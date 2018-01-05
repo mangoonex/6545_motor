@@ -1,0 +1,12 @@
+"m654x.obj",
+"main.obj",
+"eeprom.obj",
+"energy.obj",
+"ce43a02_ce.obj",
+"ce43a02_dat.obj" 
+TO "ce43_ex.abs" REGFILE (.\ce43_ex.abs.ORC) 
+RAMSIZE(256) 
+DISABLEWARNING (16) 
+CODE( 0X0400-0XFFFF , ?CO?CE43a02_DAT (0x0FE), ?CO?CE43a02_CE (0xBFE) )
+XDATA( 0X0520-0X13FF )
+PDATA( 0x200 )

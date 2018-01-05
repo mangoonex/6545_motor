@@ -1,0 +1,198 @@
+[SignumSystemsConfiguration]
+Version=Wemu51,1            
+
+[System]
+ASMextensions=ASM;A51            
+Cextensions=C;LST            
+Chip=71M6543            
+Clock=external            
+ClockDivider=1.000000            
+ClockExtFrequency=4.900000            
+ClockIntFrequency=4.920000            
+ColorCSyntax=yes            
+ComplexStepMode=0x2            
+ComplexStepModeRepCnt1=45            
+CopyCOMMONtoBanks=no            
+Device=USB1,\\?\usb#vid_04b4&pid_7d12#6&1276c9b0&0&2#{8e16e7f7-a7f7-4da1-b438-ce5435c094a8},ADM51:62038            
+EntryPointAppName=ce43_ex.FST,___            
+ExtEHMode=0            
+FileSearchExtFirst=yes            
+FileSearchLookInSubfolders=yes           
+FirmwareDownload=no            
+FSTConverterPath=            
+FSTCustomString=            
+FSTExcludeMultSymbols=yes            
+FSTFormatId=            
+FSTInputFile=            
+FSTOutputFile=            
+FSTUseHex=no            
+GoFromBreakWithInstructionStep=yes            
+GoWhenStoppedOnIntVector=yes            
+InstructionStepIntoOverInterrupts=no            
+KBVScrollMode=mixed            
+LineStepIntoOverInterrupts=no            
+LoadBreakpointsOnStartup=yes            
+LoadBreakpointsOnStartupAll=yes            
+LoadConfigOnStartup=yes            
+LoadedProgram="D:\TDK6545\ce43_ex.FST"                                                     
+LoadedProgramExtInfo=D:\TDK6545\ce43_ex.abs,Keil AOMF51                                                     
+LoadFlags=0xf            
+LoadProgramOnStartup=no            
+LoadUserSymbolTableOnStartup=yes            
+MaxNoAskPages=10            
+PageMargins=10, 13, 10, 13, millimeters            
+PLMextensions=PLM            
+Power=external            
+ProjectComment=            
+ProjectName=6543_ce_demo            
+QuickStopDetect=yes            
+ResetChipAfterFSTLoad=no            
+ScriptCmdExecDelay=10            
+ShowBinaryModules=no            
+ShowCmdErrMsgInStatusLine=no            
+ShowScrollTips=yes            
+ShowToolTips=yes            
+ShowValueTips=yes            
+Sound=yes            
+SourceDblClkAsGO=yes            
+SymbolsColumnWidth=120            
+TABSize=8            
+Target=ADM51 Emulator            
+TargetFamily=Intel 8051 family            
+UnloadClearBreakpoints=yes            
+UnloadFillPattern=            
+UpdateModeForChangedFiles=0            
+VIPERInterface=no             
+VIPERName=Wemu51            
+VIPERTime=600            
+WindowEditorWriteAllMode=yes            
+
+[VisibleWindows]
+ToolBar            
+StatusLine            
+Status_1            
+Command_1            
+Watch_1            
+Source_1            
+
+[MainWindow]
+Size=1292, 728
+Position=-9, 0
+SizeDescription=Maximized
+
+[SymbolEngine0]
+CaseSensitivity=no
+UseUNTYPEDasCODE=no
+UseUNTYPEDasDATA=no
+DisplaySymbolValues=no
+DisplaySymbolicInfo=yes
+
+[ProgramMemory]
+MemSize=64
+BankSize=0
+
+[BankPort]
+BankingRegister=P1
+BankingBits=0 1 2
+
+[TraceEngine0]
+IsEnabled=no
+IsLogging=no
+TransmittedSample=0 96 41 32 118 24 238 18 0 0 0 0 0
+TimestampMode=Off
+PortSelection=0
+
+[CoverageMonitor]
+AcquireMode=1
+AnalyzeMode=Address Range, 0, 0xffff
+ShowExecCodeInSource=yes
+Report=1, Normal,
+
+[ProgramPath]
+Segment1=D:\TDK6545\source
+
+[CustomizedCommands]
+
+[ToolBar]
+
+[Status_1]
+Size=148, 448
+Position=1452, 0
+SizeDescription=Normal
+FontLogSize=6, 10
+FontPixSize=8, 13
+FontSpec=Courier, 500, 0
+ColorMap=0xdaf1f1, 0, 0xff0000, 0, 0xff, 0xff, 0xff00ff, 0xc0c0c0, 0, 0xc0c0c0, 0xffffff, 0x7, 0xc48f40, 0x72756f53, 0x315f6563, 0x46202d00
+DisplayChanges=yes
+ReadOnly=no
+Frozen=no
+
+[Command_1]
+Size=384, 663
+Position=896, 0
+SizeDescription=Normal
+FontLogSize=6, 10
+FontPixSize=8, 13
+FontSpec=Courier, 500, 0
+ColorMap=0xe3fdf4, 0, 0xff, 0xff0000, 0x46202d00, 0x6f6c6c6f, 0x6f632077, 0x66206564, 0x7375636f, 0x7fffff00, 0x11cf40, 0x42, 0, 0, 0x11de64, 0x1
+HeaderVisible=yes
+RemotePutLoopCount=10
+
+[Watch_1]
+Size=588, 260
+Position=820, 1
+SizeDescription=Normal
+FontLogSize=6, 10
+FontPixSize=8, 13
+FontSpec=Courier, 500, 0
+ColorMap=0xfffef4, 0, 0xff0000, 0, 0, 0xff, 0xff00ff, 0xc0c0c0, 0, 0xc0c0c0, 0x2065646f, 0x75636f66, 0x73, 0, 0, 0x127248
+DisplayChanges=yes
+ReadOnly=no
+Frozen=no
+Item0_Width=36
+Item1_Width=9
+Item2_Width=8
+File=
+AutoRefreshEnable=no
+AutoRefreshMode=1
+AutoRefreshInterval=1000
+
+[Source_1]
+Size=796, 652
+Position=2, -4
+SizeDescription=Normal
+FontLogSize=6, 10
+FontPixSize=8, 13
+FontSpec=Courier, 500, 0
+ColorMap=0xffffff, 0, 0xff00ff, 0, 0x800000, 0, 0xc0c0c0, 0xff, 0xffff, 0xff, 0xff0000, 0xff00ff, 0x8000, 0, 0, 0xff00ff
+FollowPC=yes
+ReadOnly=no
+ShowExecutedCodeUsingMarker=yes
+ShowNonExecutedCode=no
+ShowOnlyLoadedCode=no
+FollowCodeFocus=yes
+DisplayMode=SourceCode
+
+[StringItems]
+LoadHistory            
+ProgressBoxPos            
+ViewSourceModules            
+
+[LoadHistory]
+D:\新建文件夹\6545_20170523\ce43_ex.hex,Hex
+D:\新建文件夹\6545_20170602\ce43_ex.hex,Hex
+D:\新建文件夹\6545_20170606\ce43_ex.hex,Hex
+D:\新建文件夹\6545_20170619\ce43_ex.hex,Hex
+D:\新建文件夹\6545_20161128\ce43_ex.hex,Hex
+D:\新建文件夹\6545_20161211\ce43_ex.hex,Hex
+D:\TDK6545\ce43_ex.hex,Hex
+D:\TDK6545\CE43_EX.FST,Keil AOMF51
+D:\TDK6545\CE43_EX.FST
+D:\TDK6545\ce43_ex.abs,Keil AOMF51
+
+[ProgressBoxPos]
+547 315
+
+[ViewSourceModules]
+{MAIN.C}@1
+{ENERGY.C}@1

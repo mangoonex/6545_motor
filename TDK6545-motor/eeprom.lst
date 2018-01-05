@@ -1,0 +1,506 @@
+C51 COMPILER V9.53.0.0   EEPROM                                                            01/05/2018 11:11:16 PAGE 1   
+
+
+C51 COMPILER V9.53.0.0, COMPILATION OF MODULE EEPROM
+OBJECT MODULE PLACED IN eeprom.obj
+COMPILER INVOKED BY: C:\Keil_v5\C51\BIN\C51.EXE source\eeprom.c LARGE OPTIMIZE(9,SIZE) REGFILE(.\ce43_ex.abs.ORC) BROWSE
+                    - INCDIR(.\) DEBUG OBJECTEXTEND PRINT(.\eeprom.lst) TABS(2) OBJECT(eeprom.obj)
+
+line level    source
+
+   1          #include "options.h"
+   2          #include "intrins.h"
+   3          #include <string.h>
+   4          #include <math.h>
+   5          #include "CONFIG.H"
+   6          #include "energy.h"
+   7          
+   8          #define SDA_OUTPUT    DIR_3 = 1;
+   9          #define SDA_INPUT   DIR_3 = 0;
+  10          #define SCL_OUTPUT    DIR_2 = 1;
+  11          #define I2C_SDA     DIO_3
+  12          #define I2C_SCL     DIO_2
+  13          #define HIGH      1
+  14          #define LOW       0
+  15          
+  16          extern uint8_t cal_finished;
+  17          
+  18          void delay(unsigned char  t)
+  19          {
+  20   1        unsigned char  i;
+  21   1        while(t)
+  22   1        {
+  23   2          for(i=0;i<20;i++)
+  24   2          {
+  25   3            _nop_();
+  26   3            _nop_();
+  27   3            _nop_();
+  28   3            _nop_();
+  29   3      
+  30   3            _nop_();
+  31   3            _nop_();
+  32   3            _nop_();
+  33   3            _nop_();
+  34   3          }
+  35   2      
+  36   2        --t;
+  37   2        }
+  38   1      }
+  39          
+  40          
+  41          void I2C_Start(void)
+  42          {
+  43   1        SDA_OUTPUT;         /* set P04 to output */
+  44   1        SCL_OUTPUT;         /* set P05 to output */
+  45   1        I2C_SDA = HIGH;         /* SCL high, SDA high */
+  46   1        delay(2);
+  47   1        I2C_SCL = HIGH;
+  48   1        delay(2);
+  49   1        I2C_SDA = LOW;          /* SDA low */
+  50   1        delay(2);
+  51   1        I2C_SCL = LOW;
+  52   1        delay(2);
+  53   1      }
+  54          
+C51 COMPILER V9.53.0.0   EEPROM                                                            01/05/2018 11:11:16 PAGE 2   
+
+  55          void I2C_Stop(void)
+  56          {
+  57   1        SDA_OUTPUT;       // set P04 to output
+  58   1        I2C_SDA = LOW;        // SDA low
+  59   1        delay(2);
+  60   1        I2C_SCL = HIGH;
+  61   1        delay(2);
+  62   1          I2C_SDA = HIGH;
+  63   1          delay(2);
+  64   1        I2C_SCL = LOW;
+  65   1        delay(2);
+  66   1      }
+  67          
+  68          void EnableWriteI2c()
+  69          {
+  70   1        DIR_4 = 1;
+  71   1        DIO_4 = 0;
+  72   1        delay(2);
+  73   1      }
+  74          
+  75          void DisableWriteI2c()
+  76          {
+  77   1        DIR_4 = 1;
+  78   1        DIO_4 = 1;
+  79   1        delay(2);
+  80   1      }
+  81          
+  82          
+  83          bool I2C_Write_Byte(uint8_t Data)
+  84          {
+  85   1        uint8_t i;
+  86   1      
+  87   1      //  EnableWriteI2c();
+  88   1        RESET_WD();
+  89   1        for (i=0; i<8; i++)
+  90   1        {
+  91   2          if (Data & 0x80)
+  92   2            I2C_SDA = HIGH;     // change data
+  93   2          else
+  94   2            I2C_SDA = LOW;      // change data
+  95   2          delay(2);
+  96   2          I2C_SCL = HIGH;       // set SCL high
+  97   2          delay(2);
+  98   2          Data <<= 1;         // shift to next bit
+  99   2          if(i < 7)
+ 100   2          {
+ 101   3            I2C_SCL = LOW;        // set SCL low
+ 102   3            delay(2);
+ 103   3          }
+ 104   2          else
+ 105   2          {
+ 106   3            I2C_SCL = LOW;        // set SCL low
+ 107   3          }
+ 108   2      
+ 109   2        }
+ 110   1        SDA_INPUT;          //?ú2¨D?é?,ò?°?à′?μSDA?íé?±?à-μí,?aê?EEPROMμ?ACK,ó??óê±?T1?.
+ 111   1        delay(2);
+ 112   1        I2C_SCL = HIGH;         //SCL high to sample acknowledge of I2C device
+ 113   1        delay(2);
+ 114   1        if (I2C_SDA == 1)
+ 115   1        {
+ 116   2          I2C_SCL = LOW;
+C51 COMPILER V9.53.0.0   EEPROM                                                            01/05/2018 11:11:16 PAGE 3   
+
+ 117   2          I2C_SDA = HIGH;
+ 118   2          SDA_OUTPUT;       //set P04 to output
+ 119   2          delay(2);
+ 120   2      //    DisableWriteI2c();
+ 121   2          return FALSE;
+ 122   2        }
+ 123   1        else
+ 124   1        {
+ 125   2          //?ACK?,SDA??,?????????????SCL????,?????SDA
+ 126   2          //SDA?????,?????SDA????,SDA??????????
+ 127   2          //??SDA?????,???,??SCL??????????????
+ 128   2          I2C_SDA = LOW;      // TEST 160215
+ 129   2          SDA_OUTPUT;       // set P04 to output
+ 130   2          delay(1);
+ 131   2          I2C_SCL = LOW;      // set SCL LOW for next transfer
+ 132   2          //I2C_SDA = HIGH;
+ 133   2      //    DisableWriteI2c();
+ 134   2          return TRUE;
+ 135   2        }
+ 136   1      }
+ 137          
+ 138          
+ 139          uint8_t I2C_Read_Byte(uint8_t ACK)
+ 140          {
+ 141   1        uint8_t read_byte = 0;
+ 142   1        uint8_t i;
+ 143   1        RESET_WD();
+ 144   1        SDA_INPUT;            // set P04 to input
+ 145   1        for (i=0; i<8; i++)
+ 146   1          {
+ 147   2            read_byte = read_byte << 1;
+ 148   2          I2C_SCL = HIGH;           // set SCL high
+ 149   2          delay(2);
+ 150   2            read_byte |= I2C_SDA;       // shift in next bit
+ 151   2            I2C_SCL = LOW;              // set SCL low
+ 152   2            delay(2);
+ 153   2          }
+ 154   1        SDA_OUTPUT;           // set P04 to output
+ 155   1        if (ACK==0)
+ 156   1          I2C_SDA = 0;          // acknowledge
+ 157   1        else
+ 158   1          I2C_SDA = 1;          // no acknowledge
+ 159   1        delay(2);
+ 160   1        I2C_SCL = HIGH;             // set SCL high
+ 161   1        delay(2);
+ 162   1        I2C_SCL = LOW;            // Acknowledge clock
+ 163   1        delay(1);
+ 164   1        return (read_byte);
+ 165   1      }
+ 166          
+ 167          bool I2C_Sequential_Write (uint16_t MemAddr,uint8_t DevSlaveAddr,uint8_t _buff_I2C[],uint8_t N)
+ 168          {
+ 169   1        uint8_t i,addr_byte;
+ 170   1        uint16_t addr;
+ 171   1        uint8_t * data_point;
+ 172   1      
+ 173   1        addr=MemAddr;
+ 174   1        data_point = _buff_I2C;
+ 175   1        i=N;
+ 176   1      
+ 177   1        EnableWriteI2c();
+ 178   1      
+C51 COMPILER V9.53.0.0   EEPROM                                                            01/05/2018 11:11:16 PAGE 4   
+
+ 179   1        while(i>0)    //for some reason data not transfer right
+ 180   1        {
+ 181   2            I2C_Start();               // start I2C transfer
+ 182   2      
+ 183   2          if (I2C_Write_Byte(DevSlaveAddr & 0xFE)==FALSE)        /* transfer slave address, and define Write cycle
+             - (Bit0 = 0) */
+ 184   2            {
+ 185   3                I2C_Stop();                   //Error
+ 186   3                return FALSE;
+ 187   3            }
+ 188   2          if (DevSlaveAddr == CAT24WCXX_ADDR)         //for at24WCxx address with is 8bit
+ 189   2          {
+ 190   3            addr_byte = (uint8_t)(addr >> 8);
+ 191   3            if (I2C_Write_Byte(addr_byte) == FALSE)       // transfer memory address
+ 192   3              {
+ 193   4                I2C_Stop();                   //Error
+ 194   4                return FALSE;
+ 195   4            }
+ 196   3            addr_byte = (uint8_t)(addr & 0xFF);
+ 197   3            if (I2C_Write_Byte(addr_byte) == FALSE)       // transfer memory address
+ 198   3              {
+ 199   4                I2C_Stop();                   //Error
+ 200   4                return FALSE;
+ 201   4            }
+ 202   3          }
+ 203   2            while(i>0)
+ 204   2          {
+ 205   3            I2C_Write_Byte(* data_point);
+ 206   3              data_point ++;
+ 207   3            addr=addr+1;
+ 208   3            i=i-1;
+ 209   3            if (addr==0)
+ 210   3            {
+ 211   4              I2C_Stop();
+ 212   4              delay(10);
+ 213   4              break;
+ 214   4            }
+ 215   3          }
+ 216   2          if(addr==0)
+ 217   2            break;
+ 218   2        }
+ 219   1        I2C_Stop();
+ 220   1        delay(10);    //very important here!
+ 221   1        delay(10);
+ 222   1      
+ 223   1        DisableWriteI2c();
+ 224   1        return TRUE;
+ 225   1      }
+ 226          
+ 227          bool I2C_Sequential_Read (uint16_t MemAddr,uint8_t  DevSlaveAddr,uint8_t  _data_point[],uint8_t N)
+ 228          {
+ 229   1        uint8_t i,addr_byte;
+ 230   1        uint16_t addr;
+ 231   1        uint8_t * data_point;
+ 232   1        uint8_t ACK =0;
+ 233   1      
+ 234   1        addr=MemAddr;
+ 235   1        data_point = _data_point;
+ 236   1        i=N;
+ 237   1        while(i>0)
+ 238   1        {
+ 239   2            I2C_Start();               // start I2C transfer
+C51 COMPILER V9.53.0.0   EEPROM                                                            01/05/2018 11:11:16 PAGE 5   
+
+ 240   2      
+ 241   2          if (I2C_Write_Byte(DevSlaveAddr & 0xFE)==FALSE)        /* transfer slave address, and define Write cycle
+             - (Bit0 = 0) */
+ 242   2            {
+ 243   3                I2C_Stop();                   //Error
+ 244   3                return FALSE;
+ 245   3            }
+ 246   2          if (DevSlaveAddr==CAT24WCXX_ADDR)         //for at24WCxx address with is 8bit
+ 247   2          {
+ 248   3            addr_byte = (uint8_t)(addr >> 8);
+ 249   3            if (I2C_Write_Byte(addr_byte) == FALSE)       // transfer memory address
+ 250   3              {
+ 251   4                I2C_Stop();                   //Error
+ 252   4                return FALSE;
+ 253   4            }
+ 254   3            addr_byte = (uint8_t)(addr & 0xFF);
+ 255   3            if (I2C_Write_Byte(addr_byte) == FALSE)       // transfer memory address
+ 256   3              {
+ 257   4                I2C_Stop();                   //Error
+ 258   4                return FALSE;
+ 259   4            }
+ 260   3          }
+ 261   2      
+ 262   2            I2C_Start();          //start I2C transfer
+ 263   2      
+ 264   2          if (I2C_Write_Byte(((DevSlaveAddr & 0xFE)|0x01))==FALSE)        // transfer slave address, and define Re
+             -ad cycle (Bit0 = 1)
+ 265   2            {
+ 266   3                I2C_Stop();                   //Error
+ 267   3                return FALSE;
+ 268   3          }
+ 269   2          else
+ 270   2          {
+ 271   3            while(i>0)
+ 272   3            {
+ 273   4              if(i == 1) ACK = 1;
+ 274   4              * data_point = I2C_Read_Byte(ACK); // read the byte
+ 275   4                data_point ++;
+ 276   4              addr=addr+1;
+ 277   4              i=i-1;
+ 278   4              if (addr==0)
+ 279   4              {
+ 280   5                I2C_Stop();
+ 281   5                break;
+ 282   5              }
+ 283   4            delay(1);
+ 284   4            }
+ 285   3          }
+ 286   2          if(addr==0)
+ 287   2            break;
+ 288   2        }
+ 289   1        I2C_Stop();
+ 290   1        return TRUE;
+ 291   1      }
+ 292          
+ 293          
+ 294          bool OSEEPROMRead (uint16_t MemAddr,uint8_t  DevSlaveAddr,uint8_t  _data_point[],uint8_t N)
+ 295          {
+ 296   1        uint8_t i;
+ 297   1        uint16_t addr;
+ 298   1        uint8_t * data_point;
+ 299   1      //  U08 count,loop;
+C51 COMPILER V9.53.0.0   EEPROM                                                            01/05/2018 11:11:16 PAGE 6   
+
+ 300   1        bool successfail=0;
+ 301   1      
+ 302   1        addr=MemAddr;
+ 303   1        data_point = _data_point;
+ 304   1        i=N;
+ 305   1        successfail = I2C_Sequential_Read ( addr , DevSlaveAddr, data_point ,i );
+ 306   1        return successfail;
+ 307   1      
+ 308   1      }
+ 309          //返回1正确  返回0错误
+ 310          bool OSEEPROMWrite (uint16_t MemAddr,uint8_t  DevSlaveAddr,uint8_t  _data_point[],uint8_t N)
+ 311          {
+ 312   1        uint8_t i,a;
+ 313   1        uint16_t addr;
+ 314   1        uint8_t * data_point;
+ 315   1        uint8_t count,loop;
+ 316   1        bool successfail=0;
+ 317   1      
+ 318   1        addr=MemAddr;
+ 319   1        data_point = _data_point;
+ 320   1        i=N;
+ 321   1      
+ 322   1        a = 8- addr % 8;
+ 323   1        if(i <= a)
+ 324   1        {
+ 325   2          successfail = I2C_Sequential_Write(addr, DevSlaveAddr, data_point,i);
+ 326   2          delay(100);
+ 327   2          //写完一连串字节后，一定要留出时间给内卡把数据从缓存写入到EEPROM,否则下一个操作，内卡不会给ACK
+ 328   2          if(!successfail)
+ 329   2            return successfail;
+ 330   2        }
+ 331   1        else
+ 332   1        {
+ 333   2          successfail = I2C_Sequential_Write(addr, DevSlaveAddr, data_point,a);
+ 334   2          delay(100);
+ 335   2          //内卡将数据从cache挪到EEPROM需要时间
+ 336   2          if(!successfail)
+ 337   2            return successfail;
+ 338   2          i -= a;
+ 339   2          addr += a;
+ 340   2          data_point += a;
+ 341   2      
+ 342   2          count = i / 8;
+ 343   2          for(loop = 0; loop < count; loop ++)
+ 344   2          {
+ 345   3            successfail = I2C_Sequential_Write ((addr+ loop * 8), DevSlaveAddr, (data_point+ loop * 8), 8);
+ 346   3            delay(100);
+ 347   3            //内卡将数据从cache挪到EEPROM需要时间
+ 348   3            if(!successfail)
+ 349   3              return successfail;
+ 350   3          }
+ 351   2          successfail = I2C_Sequential_Write ((addr + count * 8), DevSlaveAddr, (data_point + count * 8), (i - cou
+             -nt * 8));
+ 352   2          delay(100);
+ 353   2          //内卡将数据从cache挪到EEPROM需要时间
+ 354   2        }
+ 355   1      
+ 356   1      
+ 357   1        return successfail;
+ 358   1      
+ 359   1      }
+ 360          
+C51 COMPILER V9.53.0.0   EEPROM                                                            01/05/2018 11:11:16 PAGE 7   
+
+ 361          void memcpy_cex_1 (int32_t *pDst, int32_t *pSrc)
+ 362          {
+ 363   1      
+ 364   1      // Never any overlapped data.
+ 365   1      
+ 366   1      //  EX_CE_BUSY = FALSE;
+ 367   1        //EX_XFER_RTC = FALSE;
+ 368   1      
+ 369   1          *((uint8_t *) pDst)  = *((uint8_t *) pSrc);  ((uint8_t *) pDst)++;   ((uint8_t *) pSrc)++;
+ 370   1          *((uint8_t *) pDst)  = *((uint8_t *) pSrc);  ((uint8_t *) pDst)++;   ((uint8_t *) pSrc)++;
+ 371   1          *((uint8_t *) pDst)  = *((uint8_t *) pSrc);  ((uint8_t *) pDst)++;   ((uint8_t *) pSrc)++;
+ 372   1      
+ 373   1          //CKCON = STRETCH_6;
+ 374   1          *((uint8_t *) pDst)  = *((uint8_t *) pSrc);  ((uint8_t *) pDst)++;   ((uint8_t *) pSrc)++;
+ 375   1          //CKCON = STRETCH_1;
+ 376   1      
+ 377   1        //EX_XFER_RTC = TRUE;
+ 378   1      //    EX_CE_BUSY = TRUE;
+ 379   1      
+ 380   1      }
+ 381          
+ 382          //功能 ：加载校表参数
+ 383          //版本号2 时间 2016 06 17
+ 384          //该版本加载的默认参数不是0x4000 与 0x00 而是u:0x4105 i:0x4216 phadj:0xfe2b
+ 385          //若校准，必须进行初始化
+ 386          bool Load_Calib_Data(uint16_t paraaddr)// rerurn 1 is ok,return 0 is fail
+ 387          {
+ 388   1        int32x_t *dadr;
+ 389   1        int32x_t sdata;
+ 390   1        uint8_t i,loop;
+ 391   1        uint8_t eeprom_new_flag;
+ 392   1        bool successfail = FALSE;
+ 393   1      
+ 394   1      //read the backup parameter
+ 395   1        for(loop = 0; loop < 3; loop ++)
+ 396   1        {
+ 397   2          successfail = OSEEPROMRead(paraaddr, CAT24WCXX_ADDR, &Bakbuf[0], PARA_NUM);
+ 398   2          if( successfail == FALSE)
+ 399   2            continue;
+ 400   2          else
+ 401   2            break;
+ 402   2        }
+ 403   1        OSEEPROMRead(EEPROM_CAL_FINISHED,CAT24WCXX_ADDR,&cal_finished,1);//校表完成标志
+ 404   1        if(cal_finished != 0 && cal_finished != 1)//新内卡，非法值,则认为未校正过
+ 405   1          cal_finished = 0;
+ 406   1        OSEEPROMRead(EEPROM_NEW_FLAG,CAT24WCXX_ADDR,&eeprom_new_flag,1);//判断是否新EEPROM
+ 407   1        if( successfail == FALSE || eeprom_new_flag != 0x55)//失败或新内卡 写默认值
+ 408   1        {
+ 409   2      //屏蔽旧程序
+ 410   2      //    for(i = 0;i <6; i++)
+ 411   2      //    {
+ 412   2      //      Bakbuf[2*i] = 0x00;
+ 413   2      //      Bakbuf[2*i+1] = 0x40;
+ 414   2      //    }
+ 415   2      //    for(i = 6; i < 9 ; i ++)
+ 416   2      //    {
+ 417   2      //      Bakbuf[2*i] = 0x00;
+ 418   2      //      Bakbuf[2*i+1] = 0x00;
+ 419   2      //    }
+ 420   2      //新程序
+ 421   2          Bakbuf[0] = 0x16;//IA
+ 422   2          Bakbuf[1] = 0x42;
+C51 COMPILER V9.53.0.0   EEPROM                                                            01/05/2018 11:11:16 PAGE 8   
+
+ 423   2          Bakbuf[2] = 0x05;//VA
+ 424   2          Bakbuf[3] = 0x41;
+ 425   2          Bakbuf[4] = 0x16;//IB
+ 426   2          Bakbuf[5] = 0x42;
+ 427   2          Bakbuf[6] = 0x05;//VB
+ 428   2          Bakbuf[7] = 0x41;
+ 429   2          Bakbuf[8] = 0x16;//IC
+ 430   2          Bakbuf[9] = 0x42;
+ 431   2          Bakbuf[10] = 0x05;//VC
+ 432   2          Bakbuf[11] = 0x41;
+ 433   2          Bakbuf[12] = 0x2b;//A PHADJ
+ 434   2          Bakbuf[13] = 0xfe;
+ 435   2          Bakbuf[14] = 0x2b;//B PHADJ
+ 436   2          Bakbuf[15] = 0xfe;
+ 437   2          Bakbuf[16] = 0x2b;//C PHADJ
+ 438   2          Bakbuf[17] = 0xfe;
+ 439   2      
+ 440   2          Bakbuf[18] = 0x1d; //wrate = 29
+ 441   2          Bakbuf[19] = 0x00;
+ 442   2          if(eeprom_new_flag != 0x55)//新内卡，回写校表参数
+ 443   2          {
+ 444   3            OSEEPROMWrite(EEPROM_TDK6545H_PARA_ADDR0, CAT24WCXX_ADDR,&Bakbuf[0],PARA_NUM);
+ 445   3            eeprom_new_flag = 0x55;
+ 446   3            OSEEPROMWrite(EEPROM_NEW_FLAG,CAT24WCXX_ADDR,&eeprom_new_flag,1);
+ 447   3            OSEEPROMWrite(EEPROM_CAL_FINISHED, CAT24WCXX_ADDR,&cal_finished,1);
+ 448   3          }
+ 449   2      
+ 450   2        }
+ 451   1        for (i=0;i<10;i++)
+ 452   1        {
+ 453   2          //bakbuf是低位在前顺序,2字节合成成一个数,就实现了高位在前（单片机默认存储格式）
+ 454   2          sdata = Bakbuf[i*2+1]*256 + Bakbuf[i*2];
+ 455   2          dadr = (TDK6545PARAADDR[i]*4);//取CE中应该存放的地址
+ 456   2          memcpy_cex_1( dadr, &sdata);
+ 457   2        }
+ 458   1      //脉冲常数test use
+ 459   1      //  ce_collate_locate = 0x1000 + 0x2d*4;
+ 460   1      //  *sadr = (Bakbuf[18] +  Bakbuf[19] * 256); //Kh = VMAX*IMAX*66.1782 / (In_8*WRATE*NACC*X)  // some thing
+             - wrong here
+ 461   1      //  memcpy_cex_1( (S32x *) ce_collate_locate, (S32x *)sadr);
+ 462   1        return TRUE;
+ 463   1      }
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =   1381    ----
+   CONSTANT SIZE    =   ----    ----
+   XDATA SIZE       =   ----      67
+   PDATA SIZE       =   ----    ----
+   DATA SIZE        =   ----    ----
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =   ----       3
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)

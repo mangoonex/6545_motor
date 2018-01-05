@@ -1,0 +1,10 @@
+[SignumSystemsWatch]
+;Miscellaneous SFRs:
+P0
+P1
+P2
+P3
+TCON
+TMOD
+TI
+RI

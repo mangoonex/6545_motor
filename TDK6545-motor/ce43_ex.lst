@@ -1,0 +1,946 @@
+C51 COMPILER V9.03   CE43_EX                                                               10/25/2015 23:35:38 PAGE 1   
+
+
+C51 COMPILER V9.03, COMPILATION OF MODULE CE43_EX
+OBJECT MODULE PLACED IN ce43_ex.obj
+COMPILER INVOKED BY: C:\Keil\C51\BIN\C51.EXE source\ce43_ex.c LARGE OPTIMIZE(9,SIZE) REGFILE(.\ce43_ex.abs.ORC) BROWSE I
+                    -NCDIR(.\) DEBUG OBJECTEXTEND PRINT(.\ce43_ex.lst) OBJECT(ce43_ex.obj)
+
+line level    source
+
+   1          /***************************************************************************
+   2           * This code and information is provided "as is" without warranty of any   *
+   3           * kind, either expressed or implied, including but not limited to the     *
+   4           * implied warranties of merchantability and/or fitness for a particular   *
+   5           * purpose.                                                                *
+   6           * AUTHOR: RGV, SD                                                         *
+   7           * DESCRIPTION: 71M654x POWER METER - 6543 CE example                      *
+   8           * Copyright (C) 2009 Maxim Integrated Products Inc. All Rights Reserved.  *
+   9           ***************************************************************************/
+  10          
+  11          #include "options.h"            // Define the IC, CE code and options.
+  12          #include <string.h>
+  13          #include <math.h>
+  14          #include "CONFIG.H"
+  15          
+  16          // Never use 'using 0' for ISRs: it won't preserve the registers used
+  17          // in the non-interrupt code.
+  18          #define   PULSE_BANK  1         // Register bank of the pulse-bank interrupt.
+  19          
+  20          #define SAG_RECOVERY_TIME 2     // It takes 2 seconds for CE data to be reliable. 
+  21          #define WATT_CREEP 16472L       // 25 Watts, a practical creep value.
+  22          
+  23          /*CE常量*/
+  24          #define VMAX    366
+  25          #define IMAX    69
+  26          #define N_ACC 2520
+  27          #define Fs (32768/15)
+  28          #define V_RMS_CONST     (1.0856e-12*VMAX*VMAX)
+  29          #define I_RMS_CONST     (1.0856e-12*IMAX*IMAX)
+  30          #define E_CONST         (1.0856e-12*VMAX*IMAX)
+  31          
+  32          /*其他*/
+  33          #define MAX_V_3P4W  50000   // 500V 相电压合法性判断最高值
+  34          #define MAX_CURRENT     IMAX*1000       //精确到0.001V所以乘以1000
+  35          
+  36          /*本地定义的变量*/
+  37          //***************电网变量**************
+  38          uint32_t g_I_Temp[3];//电流
+  39          uint16_t g_V_Temp[3];//相电压
+  40          uint16_t g_V_Line_Temp[3];      //线电压
+  41          uint32_t g_PW_T[4];
+  42          uint32_t g_PVar_T[4];
+  43          
+  44          //**************************通讯*************************
+  45          
+  46          uint8_t rx_count=0;     //rx counter
+  47          uint8_t tx_count=0;     //tx counter
+  48          uint8_t *p_rx_buf;
+  49          uint8_t *p_tx_buf;
+  50          uint8_t NetAddress; //地址
+  51          bool    Is_Rx_Ok;
+  52          RECEIVEFRAME xdata SerialBuffer;//帧格式
+  53          uint8_t ReceFrameStar; //开始接收帧标识
+  54          uint8_t ReceDelayCnt;   //接收超时时间  30*10ms=300ms
+C51 COMPILER V9.03   CE43_EX                                                               10/25/2015 23:35:38 PAGE 2   
+
+  55          uint8_t ReceDelayOut;   //接收超时标识
+  56          #define REC_DELAY_MAX   30      //超时时间 30*10ms=300ms
+  57          #define CMD_READ_VOLTAGE        0x30    //读取电压
+  58          //************************计量*********************************
+  59          
+  60          bit xfer_update;                // CE data is ready to use.
+  61          uint8_t data power_fail_timer;  // Wait for CE's filter to stabilize.
+  62          volatile int32_t zc_cnt;        // Count zero crossings.
+  63          volatile int32_t sag_cnt;       // Count sags that affected all the phases.
+  64          
+  65          /* Detect battery power*/
+  66          bool batmode_is_brownout (void) small reentrant;
+  67          
+  68          /* CE data ready ISR */
+  69          void xfer_rtc_isr (void) small reentrant; 
+  70          
+  71          /* Power failure detection ISR */
+  72          void pulse_isr (void) small reentrant;
+  73          
+  74          /* Null interrupt ISR to reset interrupts*/
+  75          static void null_isr (void);
+  76          
+  77          /* Copy xdata table */
+  78          void xdata_table(uint8r_t *c_ptr);
+  79          void Xfer_Process(void);
+  80          void Init_Serial(void);
+  81          void Serial_Process(void);
+  82          bool Serial_Buf_Process(void);
+  83          
+  84          
+  85          /* Internal IO RAM table; This is a demo that assumes
+  86           * hard reset in order to show only bits the CE needs.
+  87           * Production code should set every bit in the IC.
+  88           * The comments describe the fields that follow. */
+  89          const uint8r_t io_ram_table[] =
+  90          {
+  91             0x21, 0x00, 0x00, 0x13, // address and length
+  92             // This is a 3-phase meter with neutral current.  
+  93             // MUX_DIV is off at first! Changing the selectors with the multiplexor
+  94             //   running can cause contention. 
+  95             // Order of multiplexer is:
+  96             //   IA, VA, IB, VB, IC, VC, IN, unused, unused, unused, unused
+  97             //   The unused ADC slots are set to an invalid number (1) as a defensive
+  98             //   programming practice.  1 is invalid because IA is differential,
+  99             //   so current input 1 is IAN, thus not selectable.
+ 100             //   Remote current sensors need a different sequence:
+ 101             //   The voltages are clustered at the end of the cycle.
+ 102             //   The ADC slots at the start of the cycle should be unused, invalid
+ 103             //   ADC slot numbers (e.g. "1" if IA is differential.)
+ 104             // The equation is "5" so the CE code makes Wh = VA*IA + VB*IB + VC*IC
+ 105             // The Vref chop is automatic (the best.)
+ 106             // RTM_E is off, because we don't need ADC data out of the IC. (RTM is
+ 107             //   a bit-serial data stream from TMUX1's 0x1F selection. It sends
+ 108             //   DSP data.)
+ 109             // CE_E (the CE) is off because its input system is not yet configured.
+ 110             // SUMSAMPS is set to 0x0888, 2184 decimal, the number of mux
+ 111             //   frames per summation interval. It makes the  summation interval
+ 112             //   ~1 S. Why? ADC's FIR length = 288, 2 crystal times * 7 samples 
+ 113             //   per mux frame, and one  crystal time of silence.
+ 114             //   (2*7)+1 = (15/32768S)/sample.  So, the Fs (sample frequency) = 
+ 115             //   32768/15 = 2184.53Hz
+ 116             // The CE's code is at 0x03*0x400, 0xC00 because the Keil linker
+C51 COMPILER V9.03   CE43_EX                                                               10/25/2015 23:35:38 PAGE 3   
+
+ 117             //   is commanded to put it there in the build options.
+ 118             // The pulse width is 0.01S, very good for most calibrators.
+ 119             // The current inputs are all differential.
+ 120             // RTM is set to the first 4 ADC locations, so if it is enabled, good
+ 121             //   data comes out.
+ 122             0x01, 0x11, 0x10, 0xA6, 0x94, 0x82, 0xA0, 0x08, // 2100..2107
+ 123             0x88, 0x03, 0x42, 0x5D, 0xF2, 0x00, 0x00, 0x01, // 2008..200F
+ 124             0x02, 0x03, 0x04,                               // 2110..2112
+ 125          
+ 126             0x22, 0x00, 0x00, 0x01, // address and length
+ 127             0x10,                   // PLL_FAST=1 MPU_DIV[2:0]=0
+ 128                                                             // Clock tree: MCK=19.6608MHz, ADC,MPU=4.9152MHz
+ 129          
+ 130             0x21, 0x00, 0x00, 0x01, // address and length ; set mux_div after ADC clock
+ 131             0x71,                   // Read 7 voltages per mux frame.
+ 132          
+ 133             0x24, 0x50, 0x00, 0x09, // address and length
+ 134             // Don't attach any interrupts or timer gates to pins.
+ 135             // Set the EEPROM interface to I2C (not needed by the CE)
+ 136             // Set the optical pin to send a Wh pulse.
+ 137             // The optical pin is not inverted. (i.e. negative-going pulse, for an LED)
+ 138             // The pulse outputs are disabled to prevent bad pulses
+ 139             //     from the CE start-up.
+ 140             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x48, 0x00,  // External interrupts
+ 141             0x00, 
+ 142          
+ 143             0x27, 0x00, 0x00, 0x05, // address and length
+ 144             // CE interrupts are enabled, others disabled.
+ 145             // The flash controls are zeroed (not needed by the CE).
+ 146             // Vref is placed on a pin so it can be measured easily. (VREF_CAL = 1)
+ 147             //   Very helpful for debugging the temperature compensation of Vref.  
+ 148             //   Not recommended for production meters.
+ 149             // The preamp is disabled (PRE_E = 0)
+ 150             // The ADC is enabled (ADC_E = 1)
+ 151             // The battery-measurement current source is off. (not needed by the CE)
+ 152             0x61, 0x00, 0x00, 0x00, 0x90,                    // 2700, No preamp, Ch. 1
+ 153          
+ 154             
+ 155             0x27, 0x09, 0x00, 0x04, // address and length
+ 156             // Remote current sensors are disabled.
+ 157             // DIO outputs are enabled (PORT_E = 1)
+ 158             // Clock is sent to both the SPI and EEPROM (SPI_E = 1; for realism)
+ 159             // Slave SPI is prevented from corrupt RAM, especially CE RAM (SPI_SAFE = 1)
+ 160             0x85, 0x55, 0x00, 0x38,                    // 2709; Remotes disabled
+ 161          
+ 162             0x00, 0x00  // end of table
+ 163          };
+ 164          
+ 165          /* Initialize MPU */ 
+ 166          void mpu_init(void)
+ 167          {
+ 168   1          RESET_WD();                     //  Clear WDT.
+ 169   1      
+ 170   1          // Set up the MPU.
+ 171   1          CKCON       = 0x00;  // The static RAM is fast; even shared.
+ 172   1          ADRMSB      = 0x02;  // Set up the PDATA upper address byte.
+ 173   1          DPL         = 0x00;
+ 174   1          DPH         = 0x00;
+ 175   1          DPL1        = 0x00;
+ 176   1          DPH1        = 0x00;
+ 177   1          DPS         = 0x00; // Select data pointer 0.
+ 178   1      
+C51 COMPILER V9.03   CE43_EX                                                               10/25/2015 23:35:38 PAGE 4   
+
+ 179   1          // Clear all existing interrupts
+ 180   1          IEN0        = 0x00;
+ 181   1          IEN1        = 0x00;
+ 182   1          IEN2        = 0x00;
+ 183   1          
+ 184   1          // Clear all waiting interrupts.
+ 185   1          IRCON       = 0x00;
+ 186   1      
+ 187   1          // Reset the interrupt priorities.
+ 188   1          IP0         = 0x0C;
+ 189   1          IP1         = 0x1B;
+ 190   1          // Interrupt priorities: frequent interrupts are higher.
+ 191   1          // Group,               Level
+ 192   1          // 0=int0, ser1         01 (serial, timer, pulse: 100Hz-~1Kz)
+ 193   1          // 1=timer0,ce_pulses   01
+ 194   1          // 2=int1, ce_busyz     10 (ce busyZ, ~2KHz)
+ 195   1          // 3=timer1, vstat      11 (VSTAT= no power, so no time)
+ 196   1          // 4=ser0, eeprom/SPI   01 (serial... 1KHz)
+ 197   1          // 5=xfer_busy,rtc1s    00 (1Hz..)
+ 198   1      
+ 199   1          // Run "RTI" to clear each of the four priority levels.
+ 200   1          ((void (code *) (void)) null_isr) (); // Clear 1st priority level.
+ 201   1          ((void (code *) (void)) null_isr) (); // Clear 2nd priority level. 
+ 202   1          ((void (code *) (void)) null_isr) (); // Clear 3rd priority level. 
+ 203   1          ((void (code *) (void)) null_isr) (); // Clear 4th priority level. 
+ 204   1      
+ 205   1          // Set up the digital I/O ports.  
+ 206   1          // Zero grounds the pins to help prevent oscillation and EMI.
+ 207   1          // DIO 0 & 1 (PORT0 bit 0 & 1) are Wh and VARh pulses, outputs.  (high off)
+ 208   1          // DIO 2 & 3 are the EEPROM pins, outputs. High so EEPROM is not selected.
+ 209   1          // DIO 4 is for the bit-banged RS232 input.
+ 210   1          // DIO 5 reads the button on the debug PCB. It should be an input.
+ 211   1          // DIO 5 is also TX2; On a serial output, idle is high.
+ 212   1          // DIO 6 is disabled; XPULSE is selected by the I/O RAM, output. (high off)
+ 213   1          // DIO 7 is disabled; YPULSE is selected by the I/O RAM, output. (high off)
+ 214   1          // DIO 9 is for the bit-banged RS-232 output.  Idle is high.
+ 215   1          // DIO 52 and 53 drive D2 and D3 on the debug PCB.
+ 216   1          // All others should default to inputs, so they don't drive the LCDs.
+ 217   1          PORT0       = 0xF3;
+ 218   1          PORT1       = 0xCC;
+ 219   1          PORT2       = 0x20;
+ 220   1          PORT3       = 0x00;
+ 221   1      
+ 222   1          T2CON       = 0x60;     // Interrupt when CE_BUSY & PULSE go high.
+ 223   1          PSW         = 0x00;
+ 224   1          A           = 0x00;
+ 225   1          B           = 0x00;
+ 226   1      
+ 227   1          //************************init uart0*************************
+ 228   1      
+ 229   1              WDCON|=0x80; //Select internal baud rate generator
+ 230   1              PCON=0; // SMOD=0
+ 231   1              // 9600BPS 与主cpu通讯
+ 232   1              // BAUD=2^SMOD*fCKMPU/(64*(2^10-S0REL))
+ 233   1              S0RELH=0xFF;
+ 234   1              S0RELL=0xF8;
+ 235   1      
+ 236   1              S0CON=0xde;  // UART mode 3. 8bit mode,parity,stop bit,receive enable
+ 237   1              //S0CON=0x5E;
+ 238   1              ES0=1; // enable serial 0 interrupt enable
+ 239   1      
+ 240   1          //**********************init t0***********************
+C51 COMPILER V9.03   CE43_EX                                                               10/25/2015 23:35:38 PAGE 5   
+
+ 241   1          TMOD = 0x11;                  // 8-bit auto reload timer/counter 0 & 1
+ 242   1          //ET0 = 1;                      // Enable Timer/Counter 0 Interrupts
+ 243   1          TR0 = 1;                      // Start Timer/Counter 0 Running
+ 244   1          TL0 = 0x84;                   // 3460 counts 10ms
+ 245   1          TH0 = 0x0d;
+ 246   1      
+ 247   1          // Clear all the interrupt flags
+ 248   1          FLAG0 = 0;
+ 249   1          FLAG1 = 0;
+ 250   1      
+ 251   1          RESET_WD();
+ 252   1      }
+ 253          
+ 254          void main ( void )
+ 255          {
+ 256   1          // This is a loop to restart the CE after brownout mode.
+ 257   1          while (TRUE)
+ 258   1          {
+ 259   2              /* Disable interrupts */
+ 260   2              EA = 0;
+ 261   2      
+ 262   2              if (COLDSTART())
+ 263   2              {
+ 264   3                  // Set TMUXs
+ 265   3                  TMUX = 0x0E;    // Set low frequency signal to save power
+ 266   3                  TMUX2 = 0x0E;
+ 267   3              }
+ 268   2      
+ 269   2              /* Initialize MPU */ 
+ 270   2              mpu_init();
+ 271   2      
+ 272   2              /* Copy IO ram table */
+ 273   2              xdata_table(&io_ram_table[0]);
+ 274   2      
+ 275   2              // In brownout don't set up the CE; the CE can't
+ 276   2              // run anyway because the ADCs are off.  Copying the data
+ 277   2              // takes time, and at a slow clock rate, that's waste.
+ 278   2              RESET_WD();                     //  Clear WDT.
+ 279   2              Init_Serial();
+ 280   2              if (!batmode_is_brownout ())
+ 281   2              {
+ 282   3                  RESET_WD();                     //  Clear WDT.
+ 283   3      
+ 284   3                  /* Clear xfer_update flag */
+ 285   3                  xfer_update = FALSE;
+ 286   3      
+ 287   3                  /* Ignore data until the phase locked loop in the CE
+ 288   3                   * has locked: 1S + 1 accumulation interval. */
+ 289   3                  power_fail_timer = SAG_RECOVERY_TIME;
+ 290   3      
+ 291   3                  /* Set CE RAM to default */
+ 292   3                  memcpy((uint8x_t*)CE_DATA_BASE, CeData, (4 * NumCeData));
+ 293   3      
+ 294   3                  /* Set up power-failure detection not set-up elsewhere
+ 295   3                   * Enable, 0.1S 
+ 296   3                   */
+ 297   3                   ceconfig = ( ceconfig & (~(long)CE_SAG_CNT))
+ 298   3                           | CE_SAG_INT | CE_EXT_PULSE
+ 299   3                           | ((((int32_t)FS_INT)/10L) << 8);
+ 300   3      
+ 301   3                   /* demonstration variables */
+ 302   3                   zc_cnt = 0;
+C51 COMPILER V9.03   CE43_EX                                                               10/25/2015 23:35:38 PAGE 6   
+
+ 303   3                   sag_cnt = 0;
+ 304   3      
+ 305   3                  // Set-up:
+ 306   3                  // CE0..CE5, CONFIG0..4
+ 307   3                  // CE's power fail pulse appears on PULSE_Y 
+ 308   3                  // PULSE_Y = DIO_9 := INT0 @ 0x200D
+ 309   3                  // PULSE_Y = 1 @ 200F
+ 310   3                  // DIO_9 = 0 @ P1, DIO_9 = out @ DIR1
+ 311   3                  // INT0 @ IEN0, =0, falling @ TCON
+ 312   3      
+ 313   3                  RESET_WD();
+ 314   3      
+ 315   3                  IEN1 = 0x22;        // Enable xfer_busy, and pulse interrupt
+ 316   3                  
+ 317   3                  IEN0 = 0x92;        // Enable interrupts.串口0,定时器0
+ 318   3      
+ 319   3                  CE6 |= CE_E;        // Enable the CE, now that it's set up.
+ 320   3      
+ 321   3                  while(!batmode_is_brownout())   // While in mission mode, run meter.
+ 322   3                  {
+ 323   4                      RESET_WD();                     //  Clear WDT.
+ 324   4                      
+ 325   4                      if (xfer_update)
+ 326   4                      {
+ 327   5                          xfer_update = FALSE;
+ 328   5                          Xfer_Process();
+ 329   5                          // Test for creep. 
+ 330   5                          if (labs(w0sum) < WATT_CREEP)
+ 331   5                          {
+ 332   6                              w0sum = 0;
+ 333   6                              var0sum = 0;
+ 334   6                          }
+ 335   5                          if (labs(w1sum) < WATT_CREEP)
+ 336   5                          {
+ 337   6                              w1sum = 0;
+ 338   6                              var1sum = 0;
+ 339   6                          }
+ 340   5                          if (labs(w2sum) < WATT_CREEP)
+ 341   5                          {
+ 342   6                              w2sum = 0;
+ 343   6                              var2sum = 0;
+ 344   6                          }
+ 345   5          
+ 346   5                          // Feed the CE's pulse generator.
+ 347   5                          apulsew = w0sum + w1sum + w2sum;
+ 348   5                          apulser = var0sum + var1sum + var2sum;
+ 349   5      
+ 350   5                      } // End of xfer_update
+ 351   4                      Serial_Process();
+ 352   4                  } 
+ 353   3              }
+ 354   2      
+ 355   2              // brownout mode never sleeps or slows the clock
+ 356   2              // in this design, so it wastes power.
+ 357   2              while (batmode_is_brownout())
+ 358   2              {
+ 359   3                  RESET_WD();
+ 360   3              }        
+ 361   2          } // Restart after brownout stops the CE.
+ 362   1      }
+ 363          
+ 364          // Moves data from a table into xdata RAM.
+C51 COMPILER V9.03   CE43_EX                                                               10/25/2015 23:35:38 PAGE 7   
+
+ 365          void xdata_table(uint8r_t *c_ptr)
+ 366          {
+ 367   1          int16_t cnt;           // This is a count and temporary variable.
+ 368   1          uint8_t xdata * x_ptr; // This is a pointer to xdata RAM.
+ 369   1          do
+ 370   1          {
+ 371   2              // Get the pointer from the table.
+ 372   2              // Use "cnt" as a temporary variable.
+ 373   2              cnt = (int16_t)*c_ptr++;
+ 374   2              cnt = (cnt << 8) | (int16_t)*c_ptr++;
+ 375   2              if (0 == cnt) break;  // Zero marks the end of the table.
+ 376   2              x_ptr = (uint8_t xdata *)cnt;
+ 377   2      
+ 378   2              // Get the size of the data from the table.
+ 379   2              cnt = (int16_t)*c_ptr++;
+ 380   2              cnt = (cnt << 8) | (int16_t)*c_ptr++;
+ 381   2      
+ 382   2              // Copy some data from the table into the I/O-RAM.
+ 383   2              for (; 0 < cnt; --cnt)
+ 384   2              {
+ 385   3                  *x_ptr++ = *c_ptr++;
+ 386   3              }
+ 387   2          }
+ 388   1          while (TRUE);
+ 389   1      }
+ 390          
+ 391          /* Find battery mode */
+ 392          #pragma save
+ 393          #pragma noaregs
+ 394          bool batmode_is_brownout (void) small reentrant
+ 395          {
+ 396   1          return ((STAT & VSTAT) > 0) ? 1 : 0;
+ 397   1      }
+ 398          #pragma restore
+ 399          
+ 400          #pragma save
+ 401          #pragma NOAREGS
+ 402          // Interrupt 6.
+ 403          void xfer_rtc_isr (void) small reentrant interrupt XFER_RTC_IV
+ 404          {
+ 405   1          // The RTC interrupt is first to reduce timing uncertainties
+ 406   1          // for RTC calibration and compensation.
+ 407   1          if (IE_RTC1S)
+ 408   1          {
+ 409   2              CLR_IE_RTC1S();                    // Just clear IE_RTC bit.
+ 410   2          }
+ 411   1      
+ 412   1          // Alarm-clock logic.
+ 413   1          // To use it, set the hour and minute, and enable the alarm.
+ 414   1          if (IE_RTCT)
+ 415   1          {
+ 416   2              CLR_IE_RTCT();
+ 417   2          }
+ 418   1      
+ 419   1          if (IE_XFER)    // Data from the CE?
+ 420   1          {
+ 421   2              CLR_IE_XFER();                  // clear IE_XFER bit
+ 422   2      
+ 423   2              // For the first second, the CE's calculations are incorrect,..
+ 424   2              // ..so the results are not worth recording.
+ 425   2              if (power_fail_timer == 0)      // Data is valid?
+ 426   2              {
+C51 COMPILER V9.03   CE43_EX                                                               10/25/2015 23:35:38 PAGE 8   
+
+ 427   3                  xfer_update = TRUE;         // Tell the main loop, new data is here.
+ 428   3              }
+ 429   2              else if (0 == --power_fail_timer)
+ 430   2              {
+ 431   3                  DIO1 |= DIO_PW | DIO_PV;    // Enable "WPULSE" and "VARPULSE".
+ 432   3                  DIO2 |= DIO_PY | DIO_PX;    // Enable interrupts from the CE.
+ 433   3              }
+ 434   2          }
+ 435   1      }
+ 436          #pragma restore
+ 437          
+ 438          #define ALL_CE_SAG_BITS (CE_SAG_A|CE_SAG_B|CE_SAG_C)
+ 439          // Interrupts on pulses from the CE.  The two most important
+ 440          // pulses are AC mains failure detection interrupt, on Y_PULSE,
+ 441          // and the AC zero-crossing interrupt, on X_PULSE.
+ 442          // These can be brought out to pins,
+ 443          // but they do not need to be.
+ 444          // The watt-hour pulse and var-hour pulse also have interrupts,
+ 445          // but the CE has built-in pulse counters for these, so no
+ 446          // interrupt is usually needed.
+ 447          #pragma save
+ 448          #pragma REGISTERBANK (PULSE_BANK)
+ 449          // Vector 9, interrupts on pulses from the CE.
+ 450          void pulse_isr (void) small reentrant interrupt CE_PULSE_IV using PULSE_BANK
+ 451          {
+ 452   1          if (IE_YPULSE)  // AC Mains failure detected by CE?
+ 453   1          {
+ 454   2              uint32_t ce_status_tmp = cestatus;  // Read the CE's status word
+ 455   2              int8_t fs = -1;         // The new frequency select index is undecoded.
+ 456   2      
+ 457   2              CLR_IE_YPULSE();        // Just clear IE_YPULSE bit.
+ 458   2      
+ 459   2              // Will the power to the meter fail? (Are all phases in sag?)
+ 460   2              // If the power supply is single phase, the test should
+ 461   2              // test just the bit of the phase that supplies the meter's power.
+ 462   2              if (ALL_CE_SAG_BITS == (ce_status_tmp & ALL_CE_SAG_BITS))
+ 463   2              {
+ 464   3                  // Yes. The meter's power supply will certainly fail.
+ 465   3                  // If the grid switches many times in a second, only
+ 466   3                  // save the billing registers the first time.
+ 467   3                  // Reclosing fault breakers typically switch five times, 
+ 468   3                  // with 100ms or less between on-times.
+ 469   3                  if (0 == power_fail_timer)
+ 470   3                  {
+ 471   4                      // save the billing registers here.  
+ 472   4                      ++sag_cnt;
+ 473   4                  }
+ 474   3                  power_fail_timer = SAG_RECOVERY_TIME;
+ 475   3      
+ 476   3                  apulsew = 0;    // Stop pulse outputs while CE data is invalid.
+ 477   3                  apulser = 0;
+ 478   3      
+ 479   3                  // Switch to battery RTC.  A convenient way is to
+ 480   3                  // disable the zero-crossing RTC's interrupt
+ 481   3                  // and then use this bit as a global flag.
+ 482   3                  INT1_E &= ~EX_XPULSE;   // Disable mains Hz interrupt.
+ 483   3              } else {
+ 484   3                  // No, at least one phase has voltage.
+ 485   3                  INT1_E |= EX_XPULSE;   // Enable mains Hz interrupt.
+ 486   3                  // Switch frequency measurement, zero crossing and VARh 
+ 487   3                  // phase detection to a working voltage input.
+ 488   3                  if (0 == (CE_SAG_A & ce_status_tmp)) // Power on phase A?
+C51 COMPILER V9.03   CE43_EX                                                               10/25/2015 23:35:38 PAGE 9   
+
+ 489   3                  {
+ 490   4                      fs = 0;
+ 491   4                  }
+ 492   3                  else if (0 == (CE_SAG_B & ce_status_tmp)) // Power on phase B?
+ 493   3                  {
+ 494   4                      fs = 1;
+ 495   4                  }
+ 496   3                  else // voltage has to be on phase C.
+ 497   3                  {
+ 498   4                      fs = 2;
+ 499   4                  }
+ 500   3                  ceconfig = (ceconfig & ~CE_FREQSEL) | ( (int32_t)(fs << 6) );
+ 501   3              }
+ 502   2          }
+ 503   1      
+ 504   1          if (IE_XPULSE)  // 60Hz zero-crossing interrupt from the CE?
+ 505   1          {
+ 506   2              CLR_IE_XPULSE();        // Just clear IE_XPULSE bit.
+ 507   2      
+ 508   2              // Why is it checking the enable bit?
+ 509   2              // Because the interrupt vector is shared, every
+ 510   2              // interrupt on it will invoke this code if the
+ 511   2              // x-pulse's interrupt bit is set.  The interrupt
+ 512   2              // enable does not disable bit, just whether the
+ 513   2              // bit causes an interrupt.
+ 514   2              if (0 != (INT1_E & EX_XPULSE)) // if the interrupt is enabled.
+ 515   2              {
+ 516   3                  // Here, count zero crossings of AC mains to make a clock.
+ 517   3                  ++zc_cnt;
+ 518   3              }
+ 519   2          } // end if mains zero-crossing interrupt.
+ 520   1      
+ 521   1          if (IE_WPULSE)  // Watt-hour pulse interrupt?
+ 522   1          {
+ 523   2              // This is served whenever a pulse interrupt occurs,
+ 524   2              // and the bit is set because a pulse occurred.
+ 525   2              CLR_IE_WPULSE();        // Just clear IE_WPULSE bit.
+ 526   2              INT2_E &= ~EX_WPULSE;   // Disable the interrupt.
+ 527   2          }
+ 528   1      
+ 529   1          if (IE_VPULSE)  // VAR-hour pulse interrupt?
+ 530   1          {
+ 531   2              // This is served whenever a pulse interrupt occurs,
+ 532   2              // and the bit is set because a pulse occurred.
+ 533   2              CLR_IE_VPULSE();        // Just clear IE_VPULSE bit.
+ 534   2              INT2_E &= ~EX_VPULSE;   // Disable the interrupt.
+ 535   2          }
+ 536   1      }
+ 537          #pragma restore
+ 538          
+ 539          /* An unused interrupt. This has an RTI instruction.
+ 540           * Calling it will clear interrupts waiting on the current 
+ 541           * priority level.
+ 542           */
+ 543          static void null_isr (void) interrupt 31
+ 544          {                             // '31' is a dummy interrupt,..
+ 545   1      } 
+ 546          
+ 547          void Xfer_Process(void)
+ 548          {
+ 549   1              uint8_t i;
+ 550   1              uint32_t temp;
+C51 COMPILER V9.03   CE43_EX                                                               10/25/2015 23:35:38 PAGE 10  
+
+ 551   1              int32_t temp_sum[4];//临时变量数组 带符号
+ 552   1              //==========有功功率  精度为0.1W===============
+ 553   1          temp_sum[0] = w0sum;
+ 554   1          temp_sum[1] = w1sum;
+ 555   1          temp_sum[2] = w2sum;
+ 556   1          temp_sum[3] = wsum;
+ 557   1      
+ 558   1              g_PW_T[3]=0;
+ 559   1          for(i=0; i<3; i++)//有功总功率   精度为0.1W 即 0.0001kW
+ 560   1          {
+ 561   2                      g_PW_T[i] = (temp_sum[i] * (E_CONST*10) * 3600 * Fs / N_ACC);
+ 562   2                      ///g_PW_T[i]-=g_PW_T[i]%10;
+ 563   2                      g_PW_T[3]+=g_PW_T[i];           //lz modify 20100612
+ 564   2              }
+ 565   1              //=========无功功率 0.01Var==============
+ 566   1          temp_sum[0] = var0sum;
+ 567   1          temp_sum[1] = var1sum;
+ 568   1          temp_sum[2] = var2sum;
+ 569   1          temp_sum[3] = varsum;
+ 570   1      
+ 571   1          g_PVar_T[3]=0;
+ 572   1          for(i=0; i<3; i++)
+ 573   1              {
+ 574   2                      temp= temp_sum[i] * (E_CONST * 10)* 3600 * Fs / N_ACC ;//无功功率
+ 575   2                      g_PVar_T[i] = (int32_t)temp;
+ 576   2                      //g_PVar_T[i]-=g_PVar_T[i]%10;
+ 577   2                      g_PVar_T[3]+=g_PVar_T[i];       //lz modify 20100612
+ 578   2              }
+ 579   1      
+ 580   1              //========电压 精度为0.01V==============
+ 581   1              temp_sum[0] = v0sqsum;
+ 582   1              temp_sum[1] = v1sqsum;
+ 583   1              temp_sum[2] = v2sqsum;
+ 584   1          for(i=0; i<3; i++)
+ 585   1              {
+ 586   2              temp = sqrt( temp_sum[i] * (V_RMS_CONST *10000)* 3600 * Fs / N_ACC); //精度为0.01V "*10000"是为了精确
+             -到0.01V
+ 587   2                      if(temp<MAX_V_3P4W)
+ 588   2                              g_V_Temp[i] = (uint16_t)temp;
+ 589   2              }
+ 590   1          //========电流精度为0.001A==========
+ 591   1          temp_sum[0] = i0sqsum;
+ 592   1          temp_sum[1] = i1sqsum;
+ 593   1          temp_sum[2] = i2sqsum;
+ 594   1          for(i=0; i<3; i++)
+ 595   1              {
+ 596   2                      temp = sqrt( temp_sum[i] * (I_RMS_CONST * 1000000) * 3600 * Fs / N_ACC); //精度为0.001A
+ 597   2                      if(temp < MAX_CURRENT)
+ 598   2                              g_I_Temp[i] = temp;
+ 599   2              }
+ 600   1      }
+ 601          
+ 602          
+ 603          void Init_Serial(void)
+ 604          {
+ 605   1              //added for test
+ 606   1              TI=0;
+ 607   1              RI=0;
+ 608   1      
+ 609   1              Is_Rx_Ok =FALSE;
+ 610   1              p_rx_buf = &SerialBuffer.framehead;
+ 611   1              rx_count = 0;
+C51 COMPILER V9.03   CE43_EX                                                               10/25/2015 23:35:38 PAGE 11  
+
+ 612   1              tx_count = 0;
+ 613   1              ReceFrameStar = 0;
+ 614   1              ReceDelayCnt = REC_DELAY_MAX;
+ 615   1              ReceDelayOut = 0;
+ 616   1      
+ 617   1      }
+ 618          //************************串口处理程序**********************
+ 619          
+ 620          void Serial_Process(void)
+ 621          {
+ 622   1              if (Is_Rx_Ok)
+ 623   1              {
+ 624   2                      if(Serial_Buf_Process())
+ 625   2                      {
+ 626   3                              tx_count=SerialBuffer.length + 4;
+ 627   3                              p_tx_buf= &SerialBuffer.command;
+ 628   3                              S0BUF = 0x68;
+ 629   3                              S0CON |= 0x08;
+ 630   3                      }
+ 631   2                      Is_Rx_Ok=FALSE;
+ 632   2              }
+ 633   1              else
+ 634   1              {
+ 635   2      //              if((ticks > 120) && (Rstate == OFF))
+ 636   2                      {
+ 637   3      //                      WDT_Awaken();
+ 638   3      //                      SaveBeforeRST(0);
+ 639   3      //                      Soft_Reset();
+ 640   3                      }
+ 641   2              }
+ 642   1      
+ 643   1      }
+ 644          bool Serial_Buf_Process(void)
+ 645          {
+ 646   1              uint8_t checksum;
+ 647   1              uint8_t loop;
+ 648   1      
+ 649   1              bool comtaskadd ;
+ 650   1              uint16_t  crccheck;
+ 651   1      //      U16x  crccheck;
+ 652   1              uint8_t *p;
+ 653   1      
+ 654   1              uint32_t temp1;
+ 655   1      
+ 656   1              comtaskadd = 0;
+ 657   1      
+ 658   1              if (SerialBuffer.address == NetAddress || SerialBuffer.address == 0xfe || SerialBuffer.address == 0xff)
+ 659   1              {
+ 660   2                      p = &SerialBuffer.serialData[0];
+ 661   2                      switch (SerialBuffer.command)//what control code
+ 662   2                      {
+ 663   3                              case CMD_READ_VOLTAGE:
+ 664   3                                      {
+ 665   4                                      //voltage of a b c
+ 666   4                                      for(loop = 0; loop < 3; loop++)
+ 667   4                                      {
+ 668   5                                              *p++ = g_V_Temp[loop];
+ 669   5                                              *p++ = g_V_Temp[loop]>>8;
+ 670   5                                      }
+ 671   4      
+ 672   4                                      //line frequence
+ 673   4                                              //*p++ = g_Line_freq;
+C51 COMPILER V9.03   CE43_EX                                                               10/25/2015 23:35:38 PAGE 12  
+
+ 674   4      
+ 675   4                                      //temperature
+ 676   4                                              //*p++ = g_Chip_Temp;
+ 677   4      
+ 678   4                                              comtaskadd = 1;
+ 679   4      
+ 680   4                                      break;
+ 681   4      
+ 682   4                                      }
+ 683   3                              case CMD_READ_CURRENT:
+*** ERROR C202 IN LINE 683 OF source\ce43_ex.c: 'CMD_READ_CURRENT': undefined identifier
+ 684   3                                      {
+ 685   4      
+ 686   4                                      for(loop = 0; loop < 3; loop++)
+ 687   4                                      {
+ 688   5                                              *p ++ = g_I_Temp[loop];
+ 689   5                                              *p ++ = g_I_Temp[loop]>>8;
+ 690   5                                              *p ++ = g_I_Temp[loop]>>16;
+ 691   5                                      }
+ 692   4                                              comtaskadd = 1;
+ 693   4                                              break;
+ 694   4                                      }
+ 695   3      
+ 696   3      
+ 697   3                              case CMD_READ_POWER:                                                                                    // Read 3 phases Power
+*** ERROR C202 IN LINE 697 OF source\ce43_ex.c: 'CMD_READ_POWER': undefined identifier
+ 698   3                                      {
+ 699   4                                      //有功功率
+ 700   4                                      for(loop = 0; loop < 3; loop++)
+ 701   4                                      {
+ 702   5                                              /*
+ 703   5                                              *p ++ =  PW_T[loop];
+ 704   5                                              *p ++ =  PW_T[loop]>>8;
+ 705   5                                              *p ++ =  PW_T[loop]>>16;
+ 706   5                                              *p ++ =  PW_T[loop]>>24;
+ 707   5                                              */
+ 708   5                                              temp1 = g_PW_T[loop];
+ 709   5                                              //temp1 = 3+loop;
+ 710   5                                              *p ++ =  temp1;
+ 711   5                                              *p ++ =  temp1>>8;
+ 712   5                                              *p ++ =  temp1>>16;
+ 713   5                                              *p ++ =  temp1>>24;
+ 714   5      
+ 715   5      
+ 716   5                                      }
+ 717   4                                      //无功功率
+ 718   4                                      for(loop = 0; loop < 3; loop++)
+ 719   4                                      {
+ 720   5                                              *p ++ =  g_PVar_T[loop];
+ 721   5                                              *p ++ =  g_PVar_T[loop]>>8;
+ 722   5                                              *p ++ =  g_PVar_T[loop]>>16;
+ 723   5                                              *p ++ =  g_PVar_T[loop]>>24;
+ 724   5                                      }
+ 725   4      
+ 726   4                                              comtaskadd = 1;
+ 727   4                                              break;
+ 728   4      
+ 729   4                                      }
+ 730   3                      }
+ 731   2              }
+ 732   1              if(comtaskadd)
+ 733   1                      {
+C51 COMPILER V9.03   CE43_EX                                                               10/25/2015 23:35:38 PAGE 13  
+
+ 734   2                              //if(READPOWER == SerialBuffer.command)
+ 735   2                              //      memset_x(SerialBuffer.serialData,  0, 10);
+ 736   2      
+ 737   2                              SerialBuffer.command = (SerialBuffer.command | 0x80);
+ 738   2                              SerialBuffer.length = p - SerialBuffer.serialData;
+ 739   2                              checksum = 0x00;
+ 740   2                              checksum += SerialBuffer.framehead;
+ 741   2                              checksum += SerialBuffer.address;
+ 742   2                              checksum += SerialBuffer.command;
+ 743   2                              checksum += SerialBuffer.length;
+ 744   2      
+ 745   2                              if(SerialBuffer.length != 0)
+ 746   2                              {
+ 747   3                                      for(loop = 0; loop < SerialBuffer.length; loop ++)
+ 748   3                                              checksum += SerialBuffer.serialData[loop];
+ 749   3                              }
+ 750   2      
+ 751   2                              SerialBuffer.checksum = checksum;
+ 752   2                              SerialBuffer.frameend = 0x16;
+ 753   2                      }
+ 754   1      
+ 755   1                      return comtaskadd;
+ 756   1      }
+ 757          
+ 758          //*****************串口中断服务程序**********************
+ 759          
+ 760          #pragma NOAREGS
+ 761          void uart0_int (void) small interrupt ES0_IV using 1
+ 762          {
+ 763   1              uint8i_t  temp,i;
+ 764   1      
+ 765   1              if(RI)
+ 766   1              {
+ 767   2                      RI=0;
+ 768   2      
+ 769   2                      if(Is_Rx_Ok) return;//已经接收完1包，还没处理
+ 770   2      
+ 771   2                      if(rx_count > (RX_BUF_SIZE + 5))//缓存区溢出
+ 772   2                      {
+ 773   3                              Init_Serial();
+ 774   3                              return;
+ 775   3                      }
+ 776   2      
+ 777   2                      p_rx_buf[rx_count] = S0BUF;
+ 778   2      
+ 779   2      
+ 780   2                      switch(rx_count)
+ 781   2                      {
+ 782   3                              case 0:  //找68开头
+ 783   3                                      if(p_rx_buf[0] == 0x68)
+ 784   3                                      {
+ 785   4                                              rx_count=1;
+ 786   4                                              ReceFrameStar = 1;//开始计算超时
+ 787   4                                              ReceDelayCnt = REC_DELAY_MAX;
+ 788   4                                      }
+ 789   3                                      break;
+ 790   3                              case 1:  //判断地址 真实地址,广播地址,主控通讯专用地址
+ 791   3                                      if((p_rx_buf[1]==NetAddress) || (p_rx_buf[1] == 0xff) || (p_rx_buf[1] == 0xfe))
+ 792   3                                              rx_count=2;
+ 793   3                                      break;
+ 794   3                              case 2: //命令字
+ 795   3                                      rx_count=3;
+C51 COMPILER V9.03   CE43_EX                                                               10/25/2015 23:35:38 PAGE 14  
+
+ 796   3                                      break;
+ 797   3                              case 3://长度字节
+ 798   3                                      if(p_rx_buf[3] == 0)//长度为0，准备接收校验和16
+ 799   3                                      {
+ 800   4                                              rx_count = 4 + RX_BUF_SIZE;
+ 801   4                                      }
+ 802   3                                      else
+ 803   3                                              rx_count = 4;
+ 804   3                                      break;
+ 805   3      
+ 806   3                              case (RX_BUF_SIZE+4):
+ 807   3                                      rx_count=RX_BUF_SIZE+5;
+ 808   3                                      break;
+ 809   3      
+ 810   3                              case (RX_BUF_SIZE+5):
+ 811   3                                      if(0x16 == p_rx_buf[rx_count])
+ 812   3                                      {
+ 813   4                                              temp=0;
+ 814   4                                              for(i=0; i < (p_rx_buf[3] + 4); i++)
+ 815   4                                                      temp += p_rx_buf[i];    //checksum
+ 816   4      
+ 817   4                                              if (p_rx_buf[(RX_BUF_SIZE + 4)] == temp)
+ 818   4                                              {
+ 819   5                                                      Is_Rx_Ok=TRUE;
+ 820   5                                                      ReceFrameStar = 0;
+ 821   5                                                      ReceDelayCnt = REC_DELAY_MAX;
+ 822   5                                                      ReceDelayOut = 0;
+ 823   5                                              }
+ 824   4                                              else
+ 825   4                                                      Init_Serial();//错误校验码，清除接收
+ 826   4                                      }
+ 827   3                                      else
+ 828   3                                              Init_Serial();//错误结束符，清除接收
+ 829   3                                      break;
+ 830   3      
+ 831   3                              default:
+ 832   3                                      if((rx_count>=4) && (rx_count < (p_rx_buf[3] + 3)))
+ 833   3                                      {
+ 834   4                                              rx_count++;
+ 835   4                                      }
+ 836   3                                      else if(rx_count == (p_rx_buf[3] + 3))
+ 837   3                                      {
+ 838   4                                              rx_count = 4 + RX_BUF_SIZE;//准备接收校验
+ 839   4                                      }
+ 840   3      
+ 841   3                                      break;
+ 842   3                      }
+ 843   2              }
+ 844   1              if(TI)
+ 845   1              {
+ 846   2                      TI=0;
+ 847   2      
+ 848   2                      if (tx_count > 0)//send next byte if necessary
+ 849   2                      {
+ 850   3                              tx_count = tx_count - 1;
+ 851   3                              ACC = *p_tx_buf;
+ 852   3                              if(PSW & 0x01)
+ 853   3                                      S0CON |= 0x08;
+ 854   3                              else
+ 855   3                                      S0CON &= 0xf7;
+ 856   3      
+ 857   3                              S0BUF = *p_tx_buf;
+C51 COMPILER V9.03   CE43_EX                                                               10/25/2015 23:35:38 PAGE 15  
+
+ 858   3                              if(tx_count <= 2)
+ 859   3                              {
+ 860   4                                      if(tx_count == 2)//发送校验码
+ 861   4                                              p_tx_buf = &SerialBuffer.checksum ;
+ 862   4                                      else//发送帧尾
+ 863   4                                              p_tx_buf = &SerialBuffer.frameend;
+ 864   4                              }
+ 865   3                              else
+ 866   3                                      p_tx_buf = p_tx_buf + 1;
+ 867   3                      }
+ 868   2                      else
+ 869   2                      {
+ 870   3                              Init_Serial();
+ 871   3                      }
+ 872   2              }
+ 873   1      }
+ 874          //****************定时器0中断服务程序**********************
+ 875          //每10ms中断一次
+ 876          void timer0_isr (void) interrupt TMR0_IV
+ 877          {
+ 878   1              if( ReceFrameStar == 1)
+ 879   1              {
+ 880   2                      if( ReceDelayCnt > 0)
+ 881   2                      {
+ 882   3                              if( --ReceDelayCnt == 0 )
+ 883   3                                      ReceDelayOut = 1;
+ 884   3                      }
+ 885   2      
+ 886   2              }
+ 887   1      }
+ 888          /***************************************************************************
+ 889           * History:
+ 890           * $Log: ce43_ex.c,v $
+ 891           * Revision 1.2  2010/06/30 23:36:03  Ray.Vandewalker
+ 892           * Ported to B01
+ 893           *
+ 894           * Revision 1.1  2009/06/15 18:25:33  dsang
+ 895           * *** empty log message ***
+ 896           *
+ 897           *
+ 898           * Copyright (C) 2009 Teridian Semiconductor Corp. All Rights Reserved.
+ 899           * this program is fully protected by the United States copyright
+ 900           * laws and is the property of Teridian Semiconductor Corporation.
+ 901           ***************************************************************************/
+ 902          
+*** WARNING C316 IN LINE 902 OF source\ce43_ex.c: unterminated conditionals
+
+C51 COMPILATION COMPLETE.  1 WARNING(S),  2 ERROR(S)

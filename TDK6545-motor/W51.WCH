@@ -1,0 +1,5 @@
+[SignumSystemsWatch]
+dc_bias, fmt_dec
+iadcN, fmt_dec
+net_status, fmt_dec
+g_I_Temp

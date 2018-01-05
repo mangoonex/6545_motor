@@ -1,0 +1,862 @@
+C51 COMPILER V9.53.0.0   ENERGY                                                            01/05/2018 11:11:16 PAGE 1   
+
+
+C51 COMPILER V9.53.0.0, COMPILATION OF MODULE ENERGY
+OBJECT MODULE PLACED IN energy.obj
+COMPILER INVOKED BY: C:\Keil_v5\C51\BIN\C51.EXE source\energy.c LARGE OPTIMIZE(9,SIZE) REGFILE(.\ce43_ex.abs.ORC) BROWSE
+                    - INCDIR(.\) DEBUG OBJECTEXTEND PRINT(.\energy.lst) TABS(2) OBJECT(energy.obj)
+
+line level    source
+
+   1          #include "options.h"            // Define the IC, CE code and options.
+   2          #include <string.h>
+   3          #include <math.h>
+   4          #include "CONFIG.H"
+   5          #include "eeprom.h"
+   6          #include "energy.h"
+   7          
+   8          #define EARTH_DEC DIO_10
+   9          
+  10          /***********************CE³£Á¿******************************/
+  11          #define PULSE_SCARE   1.0149
+  12          #define N_ACC 2184
+  13          #define Fs (32768/15)
+  14          #define V_RMS_CONST   (1.0856e-12*VMAX*VMAX)
+  15          #define I_RMS_CONST   (1.0856e-12*IMAX*IMAX)
+  16          #define E_CONST     (1.0856e-12*VMAX*IMAX)
+  17          #define ENERY_PER_UNIT  (long)(10/(1.0856e-12*VMAX*IMAX))//xxxxxx.xx¾«È·µ½0.01kwh
+  18          #define IADC01_PRE_AMPLIFY  8 //IADC01µÄÇ°ÖÃ·Å´ó±¶Êý£¬ÓÐPRE_E¿ØÖÆ¡£
+  19          
+  20          /*************************ÆäËû***********************************/
+  21          #define MAX_V_3P4W  50000   // 500V ÏàµçÑ¹ºÏ·¨ÐÔÅÐ¶Ï×î¸ßÖµ
+  22          #define MAX_CURRENT IMAX*100000 //¾«È·µ½0.001AËùÒÔ³ËÒÔ1000
+  23          #define MIN_CURRENT_POINT_5 500     // 0.5A
+  24          #define MIN_CURRENT_POINT_2 100   // 0.1A
+  25          #define MIN_VOL_50     5000   //50v
+  26          #define WATT_CREEP 5200       //Ç±¶¯Öµ
+  27          /*************************ÁãÏßµçÁ÷Ã¿ÖÜ²¨¸üÐÂ****************************************/
+  28          //315416  ½ÓCTÊ±ÖµÔÚ10~12Ö®¼ä²¨¶¯
+  29          //318603  Î´½ÓCTÊ±ÖµÔÚ6~7
+  30          //398254  Îª50¸ö²ÉÑùÖµËã³öµÄÆ½¾ùÖµ
+  31          #define DC_BIAS   97624
+  32          #define N_SCARE   3665  //Ô­Ê¼ÖµËõÐ¡±¶Êý
+  33          
+  34          //**********************µçÍø±äÁ¿**********************************
+  35          uint32_t g_I_Temp[5];//µçÁ÷,º¬Â©µçÁ÷¼ì²âABCN,N(ADC)
+  36          uint16_t g_V_Temp[3];//ÏàµçÑ¹0.01v
+  37          uint16_t g_V_Line_Temp[3];  //ÏßµçÑ¹
+  38          uint32_t g_PW_T[4];
+  39          uint32_t g_PVar_T[4];
+  40          int16_t g_Cos_T[4];     //ABC×Ü¹¦ÂÊÒòÊý
+  41          uint16_t g_PhUI_T[3];       //0.01 ¶È
+  42          uint16_t g_PhUU_T[2];     // 0.01 ¶È
+  43          uint32_t tem_Wh_P,tem_Wh_N;     //ÓÐ¹¦ÕýÏò·´Ïò ×ÜµçÁ¿ÓàÊý
+  44          uint32_t tem_Varh_P,tem_Varh_N;   //ÎÞ¹¦ÕýÏò·´Ïò ×ÜµçÁ¿ÓàÊý
+  45          uint32_t temA_Wh_P,temA_Wh_N,temB_Wh_P,temB_Wh_N,temC_Wh_P,temC_Wh_N;//ÓÐ¹¦ÕýÏò·´Ïò ABCµçÁ¿ÓàÊý
+  46          uint32_t temA_Varh_P,temA_Varh_N,temB_Varh_P,temB_Varh_N,temC_Varh_P,temC_Varh_N;//ÎÞ¹¦ÕýÏò·´Ïò ABCµçÁ¿ÓàÊ
+             -ý
+  47          uint32_t g_Wh_PT[5],g_Wh_NT[5];//[0][1][2]ÎªABCÏàµçÄÜ[3]Îª×Ü[4]Îª[3]µÄ±¸·Ý,[3]ÊµÊ±¸üÐÂ,[4]²»ÊµÊ±¸üÐÂ
+  48          uint32_t g_Varh_Q1[5],g_Varh_Q2[5],g_Varh_Q3[5],g_Varh_Q4[5];//ÓÐ¹¦ÎÞÕý·´,Ö»°´ÏóÏÞÇø·Ö
+  49          bool   g_EnergyClear;       //Çå³ýµçÁ¿
+  50          
+  51          int32_t  iadcN[IADCN_MAX_SAMPLES];  //N ADCµÄÔ­Ê¼Öµbuf
+  52          uint8_t  iadcN_p;         //¼ÆÊýÖµ£¬ÂúIADCN_MAX_SAMPLES¸öÊ±£¬×öÒ»´Î»ý·Ö¡£
+  53          int32_t  n_current_adc;
+C51 COMPILER V9.53.0.0   ENERGY                                                            01/05/2018 11:11:16 PAGE 2   
+
+  54          int32_t  dc_bias; //Ö±Á÷Æ«ÖÃ
+  55          
+  56          
+  57          
+  58          //***********************Ð£±í*************************
+  59          #define FAC               DIO_5   //Ó²¼þÐ£±í¼ì²â¿Ú
+  60          #define D_ERR_MODE                  0x00        //´íÎóÌáÊ¾Ä£Ê½
+  61          #define D_NORMAL_MODE           0x10      //Õý³£¹¤×÷Ä£Ê½
+  62          #define D_CAL_START_MODE        0x21      //Ð£ÕýÄ£Ê½£¬Æô¶¯
+  63          #define D_CAL_END_MODE            0x23      //Ð£ÕýÄ£Ê½£¬Íê³É
+  64          #define FAC_EN            0     //Ó²¼þÐ£±íÔÊÐí
+  65          #define FAC_DIS           0x80    //Ó²¼þÐ£±í²»ÔÊÐí
+  66          #define FAC_STABLE_TIME       10      //FACÁ¬Ðø10´ÎÓÐÐ§²Å¿ªÊ¼Ð£Õý
+  67          #define CAL_POWER_MIN       15400   //2200*0.7W Ð£±íÊ±£¬¹¦ÂÊÏÞÖÆ
+  68          #define CAL_POWER_MAX       28600   //2200*1.3W Ð£±íÊ±£¬¹¦ÂÊÏÞÖÆ
+  69          #define CAL_POWER_DEVIATION     50      //¹¦ÂÊÕñ·ù 5W
+  70          #define AV_POWER_N          3     //¹¦ÂÊ»º´æÇø´óÐ¡£¬Ð£±íÓÃ
+  71          #define STAND_V           22000   //±ê×¼µçÑ¹220.00V Ð£±íÓÃ
+  72          #define STAND_I           10000   //±ê×¼µçÁ÷ 10.000AÐ£±íÓÃ
+  73          #define STAND_P           22000   //±ê×¼¹¦ÂÊ 2200.0WÐ£±íÓÃ
+  74          
+  75          uint8_t Bakbuf[PARA_NUM];
+  76          uint8_t code TDK6545PARAADDR[10] = {0x10,0x11,0x13,0x14,0x16,0x17,0x12,0x15,0x18,0x21};
+  77          
+  78          uint8_t     U8_CURR_WorkMode;
+  79          uint16_t  U16_FAC_STABLE_Times;       //ÅÐ¶ÏFACÎÈ¶¨µÄ´ÎÊý£¬10´ÎÈ¥¶¶
+  80          uint32_t  g_PW_T_Buf[3][AV_POWER_N];      //»º³å×î½üN´Î¹¦ÂÊÖµ (ABCÈýÏà)
+  81          
+  82          /************************************************************/
+  83          uint8_t net_status;       //µçÍø×´Ì¬×Ö bit0 µØÏß¼ì²â
+  84          uint8_t net_status_lock;    //µçÍø×´Ì¬×ÖËø´æ£¬Í¨Ñ¶¶Áºó²ÅÄÜ¸üÐÂ¡£
+  85          uint32_t n_Current;     //ÁãÏßµçÁ÷¼ì²â
+  86          uint8_t cal_finished;   //Ð£±íÍê³É±êÖ¾ 1£ºÒÑÐ£  0£ºÎ´Ð£
+  87          uint8_t EarthDelayStar;   //µØÏß¼ì²â¿ªÊ¼±êÊ¶
+  88          uint8_t EarthDelayCnt;    //µØÏß¼ì²â³¬Ê±Ê±¼ä
+  89          uint8_t EarthDelayOut;      //µØÏß¼ì²â³¬Ê±±êÊ¶
+  90          
+  91          //***********************ÉêÃ÷***************************
+  92          void Cal_Energy(void);
+  93          
+  94          void Convert_Ncurrent(void)
+  95          {
+  96   1        uint8_t i;
+  97   1        int32_t sum = 0;
+  98   1        int32_t sum_with_bias = 0;
+  99   1        float float_data;
+ 100   1        static int32_t n_current_old = 0;
+ 101   1      
+ 102   1        if(iadcN_p == (IADCN_MAX_SAMPLES))//Íê³ÉÒ»ÖÜÆÚ²ÉÑù
+ 103   1        {
+ 104   2          IEN1 &= (~EX3_);//½ûÓÃCEBUSYÖÐ¶Ï
+ 105   2          for(i=0 ; i < IADCN_MAX_SAMPLES ;i++)
+ 106   2          {
+ 107   3            iadcN[i] /= IADC01_PRE_AMPLIFY;//PRE_E =1 ´ò¿ªÁËÇ°ÖÃ·Å´óÆ÷
+ 108   3            sum_with_bias += iadcN[i];
+ 109   3          }
+ 110   2          dc_bias = sum_with_bias/IADCN_MAX_SAMPLES;
+ 111   2          for(i=0 ; i < IADCN_MAX_SAMPLES ;i++)
+ 112   2            iadcN[i] =(iadcN[i]-dc_bias);//·ÀÖ¹Òç³ö.
+ 113   2          for(i=0 ; i < IADCN_MAX_SAMPLES ;i++)
+ 114   2            iadcN[i] /= N_SCARE;
+ 115   2          for(i=0 ; i < IADCN_MAX_SAMPLES ;i++)
+C51 COMPILER V9.53.0.0   ENERGY                                                            01/05/2018 11:11:16 PAGE 3   
+
+ 116   2            sum += (iadcN[i]*iadcN[i]/IADCN_MAX_SAMPLES);
+ 117   2          float_data = sqrt(sum);
+ 118   2          n_current_adc = (float_data);//±£´æ½á¹û£¬²¢×ª»»ÀàÐÍ
+ 119   2          if(n_current_adc >= MAX_CURRENT)
+ 120   2            n_current_adc = 0;
+ 121   2          g_I_Temp[4] = n_current_adc;
+ 122   2          if(n_current_adc >= n_Current && n_Current != 0 && n_current_old >=n_Current)//ÅÐ¶ÏÊÇ·ñÂ©µç
+ 123   2            {
+ 124   3              net_status |= 0x02; //bit1 ÖÃ1
+ 125   3              if(net_status != 0)
+ 126   3                TELL_MCU;
+ 127   3              net_status_lock |= 0x02;
+ 128   3            }
+ 129   2          else
+ 130   2            {
+ 131   3              net_status &= 0xfd; //bit1 Çå0
+ 132   3              if(net_status == 0)
+ 133   3                NOT_TELL;
+ 134   3            }
+ 135   2          n_current_old =n_current_adc;
+ 136   2          iadcN_p = 0;//Ö¸Õë¹é0£¬Çå²Ö¡£¹ýÁãÖÐ¶ÏÅÐ¶ÏÇå²Ö×´Ì¬²Å¿ªÆô²ÉÑùÖÐ¶Ï
+ 137   2        }
+ 138   1      
+ 139   1      }
+ 140          
+ 141          int16_t Cal_Cos(int32_t w, int32_t var, uint8_t phase)
+ 142          {
+ 143   1        int16_t Cos_T;
+ 144   1        float floatdata;
+ 145   1        if(phase != 3)
+ 146   1        {
+ 147   2          if(g_I_Temp[phase] > MIN_CURRENT_POINT_5)
+ 148   2            floatdata = 1000 * (w>>13) / (sqrt( (w>>13)*(w>>13) + (var>>13) * (var>>13)));
+ 149   2          else if(g_I_Temp[phase] <= MIN_CURRENT_POINT_5 && g_I_Temp[phase] >= MIN_CURRENT_POINT_2)
+ 150   2            floatdata = 1000 * (w>>9) / (sqrt( (w>>9)*(w>>9) + (var>>9) * (var>>9) ));
+ 151   2          else
+ 152   2            floatdata = 1000;//µçÁ÷¹ýÐ¡Ê±£¬Ä¬ÈÏ¹¦ÂÊÒòÊýÎª1
+ 153   2        }
+ 154   1        else
+ 155   1        {
+ 156   2          if(g_I_Temp[0] < MIN_CURRENT_POINT_2 && g_I_Temp[1] < MIN_CURRENT_POINT_2 && g_I_Temp[2] < MIN_CURRENT_P
+             -OINT_2)
+ 157   2            floatdata = 1000;//ÈýÏàµçÁ÷¾ù¹ýÐ¡Ê±£¬Ä¬ÈÏ¹¦ÂÊÒòÊýÎª1
+ 158   2          else
+ 159   2          {
+ 160   3            if(g_I_Temp[0] > MIN_CURRENT_POINT_5 || g_I_Temp[1] > MIN_CURRENT_POINT_5 || g_I_Temp[2] > MIN_CURRENT_
+             -POINT_5)
+ 161   3              floatdata = 1000 * (w>>13) / (sqrt( (w>>13)*(w>>13) + (var>>13) * (var>>13)));
+ 162   3            else
+ 163   3              floatdata = 1000 * (w>>9) / (sqrt( (w>>9)*(w>>9) + (var>>9) * (var>>9) ));
+ 164   3          }
+ 165   2        }
+ 166   1          Cos_T = floatdata;//ÀàÐÍ×ª»»
+ 167   1        return Cos_T;
+ 168   1      }
+ 169          
+ 170          int16_t Cal_phUI(int32_t var, int16_t cos_t)
+ 171          {
+ 172   1        uint32_t temp;
+ 173   1        int16_t phui_t;
+ 174   1      
+ 175   1          temp = acos(cos_t / 1000.00000) * 18000.00 / 3.1416;
+C51 COMPILER V9.53.0.0   ENERGY                                                            01/05/2018 11:11:16 PAGE 4   
+
+ 176   1          if(var < 0)
+ 177   1          temp = 36000 - temp;
+ 178   1          phui_t = temp;
+ 179   1      
+ 180   1          return phui_t;
+ 181   1      }
+ 182          
+ 183          void Xfer_Process(void)
+ 184          {
+ 185   1        uint8_t i,j;
+ 186   1        uint32_t temp;
+ 187   1        int32_t temp_sum[4];//ÁÙÊ±±äÁ¿Êý×é ´ø·ûºÅ
+ 188   1        int32_t pulse_sum;
+ 189   1        //float f_sum;
+ 190   1        RESET_WD();
+ 191   1        // ¿ØÖÆÇ±¶¯Test use
+ 192   1          if (labs(w0sum) < WATT_CREEP)
+ 193   1          {
+ 194   2              w0sum = 0;
+ 195   2              var0sum = 0;
+ 196   2          }
+ 197   1          if (labs(w1sum) < WATT_CREEP)
+ 198   1          {
+ 199   2              w1sum = 0;
+ 200   2              var1sum = 0;
+ 201   2          }
+ 202   1          if (labs(w2sum) < WATT_CREEP)
+ 203   1          {
+ 204   2              w2sum = 0;
+ 205   2              var2sum = 0;
+ 206   2          }
+ 207   1      
+ 208   1          // Âö³åÔ´¼Ä´æÆ÷Feed the CE's pulse generator.
+ 209   1          pulse_sum = w0sum + w1sum + w2sum;
+ 210   1          pulse_sum *= PULSE_SCARE;
+ 211   1          apulsew = pulse_sum;
+ 212   1          pulse_sum = var0sum + var1sum + var2sum;
+ 213   1          pulse_sum *= PULSE_SCARE;
+ 214   1          apulser = pulse_sum;
+ 215   1      
+ 216   1        //==========ÓÐ¹¦¹¦ÂÊ  ¾«¶ÈÎª0.1W===============
+ 217   1          temp_sum[0] = w0sum;
+ 218   1          temp_sum[1] = w1sum;
+ 219   1          temp_sum[2] = w2sum;
+ 220   1          temp_sum[3] = wsum;
+ 221   1      
+ 222   1        g_PW_T[3]=0;
+ 223   1          for(i=0; i<3; i++)//ÓÐ¹¦×Ü¹¦ÂÊ   ¾«¶ÈÎª0.1W ¼´ 0.0001kW
+ 224   1          {
+ 225   2          g_PW_T[i] = (temp_sum[i] * (E_CONST*10) * 3600 * Fs / N_ACC);
+ 226   2          ///g_PW_T[i]-=g_PW_T[i]%10;
+ 227   2          g_PW_T[3]+=g_PW_T[i];   //lz modify 20100612
+ 228   2        }
+ 229   1          //»º´æ×î½üN´ÎABC¹¦ÂÊ£¬×î½üµÄ·Å[i][0]
+ 230   1          for(i=0 ;i<3; i++)//ÒÀ´ÎºóÒÆ
+ 231   1          {
+ 232   2            for(j=AV_POWER_N-1; j>=1; j--)
+ 233   2              g_PW_T_Buf[i][j] = g_PW_T_Buf[i][j-1];
+ 234   2          }
+ 235   1          for(i=0 ;i<3; i++)
+ 236   1            g_PW_T_Buf[i][0] = g_PW_T[i];
+ 237   1      
+C51 COMPILER V9.53.0.0   ENERGY                                                            01/05/2018 11:11:16 PAGE 5   
+
+ 238   1        //=========ÎÞ¹¦¹¦ÂÊ 0.01Var==============
+ 239   1          temp_sum[0] = var0sum;
+ 240   1          temp_sum[1] = var1sum;
+ 241   1          temp_sum[2] = var2sum;
+ 242   1          temp_sum[3] = varsum;
+ 243   1      
+ 244   1          g_PVar_T[3]=0;
+ 245   1          for(i=0; i<3; i++)
+ 246   1        {
+ 247   2          temp= temp_sum[i] * (E_CONST * 10)* 3600 * Fs / N_ACC ;//ÎÞ¹¦¹¦ÂÊ
+ 248   2          g_PVar_T[i] = (int32_t)temp;
+ 249   2          //g_PVar_T[i]-=g_PVar_T[i]%10;
+ 250   2          g_PVar_T[3]+=g_PVar_T[i]; //lz modify 20100612
+ 251   2        }
+ 252   1      
+ 253   1        //========µçÑ¹ ¾«¶ÈÎª0.01V==============
+ 254   1        temp_sum[0] = v0sqsum;
+ 255   1        temp_sum[1] = v1sqsum;
+ 256   1        temp_sum[2] = v2sqsum;
+ 257   1          for(i=0; i<3; i++)
+ 258   1        {
+ 259   2            temp = sqrt( temp_sum[i] * (V_RMS_CONST *10000)* 3600 * Fs / N_ACC); //¾«¶ÈÎª0.01V "*10000"ÊÇÎªÁË¾«È·
+             -µ½0.01V
+ 260   2          if(temp<MAX_V_3P4W)
+ 261   2            g_V_Temp[i] = (uint16_t)temp;
+ 262   2        }
+ 263   1          //========µçÁ÷¾«¶ÈÎª0.001A==========
+ 264   1          temp_sum[0] = i0sqsum;
+ 265   1          temp_sum[1] = i1sqsum;
+ 266   1          temp_sum[2] = i2sqsum;
+ 267   1          temp_sum[3] = idsqsum;
+ 268   1          for(i=0; i<4; i++)
+ 269   1        {
+ 270   2          temp = sqrt( temp_sum[i] * (I_RMS_CONST * 1000000) * 3600 * Fs / N_ACC); //¾«¶ÈÎª0.001A
+ 271   2          if(temp < MAX_CURRENT)
+ 272   2          {
+ 273   3            if(i == 3)
+ 274   3              g_I_Temp[i] = (temp/IADC01_PRE_AMPLIFY);
+ 275   3            else
+ 276   3              g_I_Temp[i] = temp;
+ 277   3          }
+ 278   2        }
+ 279   1      
+ 280   1          //=====¹¦ÂÊÒòÊý Ïà½Ç====================
+ 281   1          g_Cos_T[0] = Cal_Cos(w0sum, var0sum, 0);
+ 282   1          g_PhUI_T[0] = Cal_phUI(var0sum, g_Cos_T[0]);
+ 283   1        g_Cos_T[1] = Cal_Cos(w1sum, var1sum, 1);
+ 284   1        g_PhUI_T[1] = Cal_phUI(var1sum, g_Cos_T[1]);
+ 285   1        g_Cos_T[2] = Cal_Cos(w2sum, var2sum, 2);
+ 286   1        g_PhUI_T[2] = Cal_phUI(var2sum, g_Cos_T[2]);//¼ÆËãµçÑ¹ÓëµçÁ÷¼Ð½Ç
+ 287   1        g_Cos_T[3] = Cal_Cos(wsum, varsum, 3);
+ 288   1      
+ 289   1        //=====µçÑ¹Ïà½Ç A-B,A-C==================
+ 290   1        //¸ßÓÚ50V²ÅÅÐ¶ÏµçÑ¹Ïà½Ç
+ 291   1        if( g_V_Temp[0] >= MIN_VOL_50 && g_V_Temp[1] >= MIN_VOL_50 )
+ 292   1        {
+ 293   2          temp =(uint32_t) (ph_atob*360/N_ACC+(2.4*15.0/13.0))*100;
+ 294   2          g_PhUU_T[0] = (uint16_t)temp;
+ 295   2        }
+ 296   1        else
+ 297   1          g_PhUU_T[0] = 0;
+ 298   1      
+C51 COMPILER V9.53.0.0   ENERGY                                                            01/05/2018 11:11:16 PAGE 6   
+
+ 299   1        if( g_V_Temp[0] >= MIN_VOL_50 && g_V_Temp[2] >= MIN_VOL_50 )
+ 300   1        {
+ 301   2          temp =(uint32_t) (ph_atoc*360/N_ACC+(4.8*15.0/13.0))*100;
+ 302   2          g_PhUU_T[1] = (uint16_t)temp;
+ 303   2        }
+ 304   1        else
+ 305   1          g_PhUU_T[1] = 0;
+ 306   1        //=====Â©µçÅÐ¶Ï====================
+ 307   1      /*  if(g_I_Temp[3] > n_Current && n_Current != 0)
+ 308   1        {
+ 309   1          //ÅÅ³ýABCÍ¬ÏàÎ»µÄÌØÊâ½Ó·¨
+ 310   1          if( (g_PhUU_T[0] >= 20 && g_PhUU_T[0] <= 340) || (g_PhUU_T[1] >= 20 && g_PhUU_T[1] <= 340) )
+ 311   1          {
+ 312   1            net_status &= 0xfd; //bit1 Çå0
+ 313   1            if(net_status == 0)
+ 314   1              NOT_TELL;
+ 315   1      
+ 316   1          }
+ 317   1          else
+ 318   1          {
+ 319   1            net_status |= 0x02; //bit1 ÖÃ1
+ 320   1            if(net_status != 0)
+ 321   1              TELL_MCU;
+ 322   1          }
+ 323   1          //ÆÁ±ÎÉÏ¶Î³ÌÐò£¬ÊÇÒòÎª¼´Ê¹Ê¹ÓÃÍ¬Ïà½Ó·¨£¬Õý³£Ê±Â©µçµçÁ÷ÈÔÎª0 2016-11-15
+ 324   1          net_status |= 0x02; //bit1 ÖÃ1
+ 325   1          if(net_status != 0)
+ 326   1            TELL_MCU;
+ 327   1        }
+ 328   1        else
+ 329   1        {
+ 330   1          net_status &= 0xfd; //bit1 Çå0
+ 331   1          if(net_status == 0)
+ 332   1            NOT_TELL;
+ 333   1      
+ 334   1        }*/
+ 335   1        //ÀÛ¼ÇµçÄÜ
+ 336   1          Cal_Energy();
+ 337   1          //ÊÇ·ñÐèÒªÇåµçÁ¿
+ 338   1        if(g_EnergyClear == TRUE)
+ 339   1          {
+ 340   2            RESET_WD();
+ 341   2            g_EnergyClear = FALSE;
+ 342   2            OSEEPROMWrite(EEPROM_ENERGY_WH_PT, CAT24WCXX_ADDR,(uint8_t*)&g_Wh_PT[0],16);
+ 343   2            OSEEPROMWrite(EEPROM_ENERGY_WH_NT, CAT24WCXX_ADDR,(uint8_t*)&g_Wh_NT[0],16);
+ 344   2            OSEEPROMWrite(EEPROM_ENERGY_VARH_Q1, CAT24WCXX_ADDR,(uint8_t*)&g_Varh_Q1[0],16);
+ 345   2            OSEEPROMWrite(EEPROM_ENERGY_VARH_Q2, CAT24WCXX_ADDR,(uint8_t*)&g_Varh_Q2[0],16);
+ 346   2            OSEEPROMWrite(EEPROM_ENERGY_VARH_Q3, CAT24WCXX_ADDR,(uint8_t*)&g_Varh_Q3[0],16);
+ 347   2            OSEEPROMWrite(EEPROM_ENERGY_VARH_Q4, CAT24WCXX_ADDR,(uint8_t*)&g_Varh_Q4[0],16);
+ 348   2          }
+ 349   1      }
+ 350          
+ 351          void Cal_Energy(void)
+ 352          {
+ 353   1        //ÓÐ¹¦
+ 354   1        //Accumulate Wh energy
+ 355   1        if(wsum<0)        // Total
+ 356   1          tem_Wh_N-=wsum;//ÓÐ¹¦·´Ïò×ÜÓàÊý
+ 357   1        else
+ 358   1          tem_Wh_P+=wsum;//ÓÐ¹¦ÕýÏò×ÜÓàÊý
+ 359   1      
+ 360   1        if(w0sum <0)      //A
+C51 COMPILER V9.53.0.0   ENERGY                                                            01/05/2018 11:11:16 PAGE 7   
+
+ 361   1          temA_Wh_N-=w0sum;//ÓÐ¹¦·´ÏòAÏàÓàÊý
+ 362   1        else
+ 363   1          temA_Wh_P+=w0sum;//ÓÐ¹¦ÕýÏòAÏàÓàÊý
+ 364   1      
+ 365   1        if(w1sum < 0)     //B
+ 366   1          temB_Wh_N-=w1sum;//ÓÐ¹¦·´ÏòBÏàÓàÊý
+ 367   1        else
+ 368   1          temB_Wh_P+=w1sum;//ÓÐ¹¦ÕýÏòBÏàÓàÊý
+ 369   1      
+ 370   1        if(w2sum< 0)     //C
+ 371   1          temC_Wh_N -= w2sum;//ÓÐ¹¦·´ÏòCÏàÓàÊý
+ 372   1        else
+ 373   1          temC_Wh_P += w2sum;//ÓÐ¹¦ÕýÏòCÏàÓàÊý
+ 374   1      
+ 375   1        //ÎÞ¹¦
+ 376   1        //Accumulate Varh energy
+ 377   1        if(varsum<0)      // Total
+ 378   1          tem_Varh_N-=varsum;
+ 379   1        else
+ 380   1          tem_Varh_P+=varsum;
+ 381   1      
+ 382   1        if(var0sum < 0)     //A
+ 383   1          temA_Varh_N-=var0sum;
+ 384   1        else
+ 385   1          temA_Varh_P+=var0sum;
+ 386   1      
+ 387   1        if(var1sum < 0)     //B
+ 388   1          temB_Varh_N-=var1sum;
+ 389   1        else
+ 390   1          temB_Varh_P+=var1sum;
+ 391   1      
+ 392   1        if(var2sum < 0)    //C
+ 393   1          temC_Varh_N-=var2sum;
+ 394   1        else
+ 395   1          temC_Varh_P+=var2sum;
+ 396   1      
+ 397   1        //ÏÂÃæ½«Î²ÊýÂú×ã0.01kwhµÄ²¿·ÖÀÛ¼Óµ½µçÁ¿ÖÐ.
+ 398   1      
+ 399   1          while(tem_Wh_P > ENERY_PER_UNIT)
+ 400   1        {
+ 401   2          tem_Wh_P -= ENERY_PER_UNIT;
+ 402   2          //ÕýÏòÓÐ¹¦×Ü
+ 403   2              g_Wh_PT[3] ++;
+ 404   2          }
+ 405   1      
+ 406   1        while(temA_Wh_P > ENERY_PER_UNIT)
+ 407   1        {
+ 408   2          temA_Wh_P -= ENERY_PER_UNIT;
+ 409   2          //ÕýÏòÓÐ¹¦A
+ 410   2            g_Wh_PT[0] ++;
+ 411   2          }
+ 412   1      
+ 413   1         while(temB_Wh_P > ENERY_PER_UNIT)
+ 414   1        {
+ 415   2          temB_Wh_P -=  ENERY_PER_UNIT;
+ 416   2          //ÕýÏòÓÐ¹¦B
+ 417   2          g_Wh_PT[1] ++;
+ 418   2        }
+ 419   1      
+ 420   1        while(temC_Wh_P > ENERY_PER_UNIT)
+ 421   1        {
+ 422   2          temC_Wh_P -= ENERY_PER_UNIT;
+C51 COMPILER V9.53.0.0   ENERGY                                                            01/05/2018 11:11:16 PAGE 8   
+
+ 423   2          //ÕýÏòÓÐ¹¦C
+ 424   2          g_Wh_PT[2] ++;
+ 425   2        }
+ 426   1      
+ 427   1        //====·´Ïò=================
+ 428   1        while(tem_Wh_N > ENERY_PER_UNIT)
+ 429   1        {
+ 430   2          tem_Wh_N -= ENERY_PER_UNIT;
+ 431   2          //·´ÏòÓÐ¹¦×Ü
+ 432   2              g_Wh_NT[3] ++;
+ 433   2        }
+ 434   1        while(temA_Wh_N > ENERY_PER_UNIT)
+ 435   1        {
+ 436   2          temA_Wh_N -= ENERY_PER_UNIT;
+ 437   2          //·´ÏòÓÐ¹¦A
+ 438   2              g_Wh_NT[0] ++;
+ 439   2        }
+ 440   1        while(temB_Wh_N > ENERY_PER_UNIT)
+ 441   1        {
+ 442   2          temB_Wh_N -= ENERY_PER_UNIT;
+ 443   2          //·´ÏòÓÐ¹¦B
+ 444   2          g_Wh_NT[1] ++;
+ 445   2        }
+ 446   1      
+ 447   1        while(temC_Wh_N > ENERY_PER_UNIT)
+ 448   1        {
+ 449   2          temC_Wh_N -= ENERY_PER_UNIT;
+ 450   2          //·´ÏòÓÐ¹¦C
+ 451   2              g_Wh_NT[2] ++;
+ 452   2        }
+ 453   1        //==========ÕýÏòÎÞ¹¦===============
+ 454   1        while(tem_Varh_P > ENERY_PER_UNIT)
+ 455   1        {
+ 456   2          tem_Varh_P -= ENERY_PER_UNIT;
+ 457   2          if(wsum>0)
+ 458   2            g_Varh_Q1[3]++;
+ 459   2          else
+ 460   2            g_Varh_Q2[3]++;
+ 461   2          }
+ 462   1      
+ 463   1        while(temA_Varh_P > ENERY_PER_UNIT)
+ 464   1        {
+ 465   2          temA_Varh_P -= ENERY_PER_UNIT;
+ 466   2          if(w0sum > 0)
+ 467   2            g_Varh_Q1[0]++;//ÓÐ¹¦Õý ÎÞ¹¦Õý µÚÒ»ÏóÏÞ
+ 468   2          else
+ 469   2            g_Varh_Q2[0]++;//ÓÐ¹¦¸º ÎÞ¹¦Õý µÚ¶þÏóÏÞ
+ 470   2          }
+ 471   1      
+ 472   1        while(temB_Varh_P > ENERY_PER_UNIT)
+ 473   1        {
+ 474   2          temB_Varh_P -= ENERY_PER_UNIT;
+ 475   2          if(w1sum > 0)
+ 476   2            g_Varh_Q1[1]++;//Í¬AÏà
+ 477   2          else
+ 478   2            g_Varh_Q2[1]++;
+ 479   2        }
+ 480   1      
+ 481   1        while(temC_Varh_P > ENERY_PER_UNIT)
+ 482   1        {
+ 483   2          temC_Varh_P -= ENERY_PER_UNIT;
+ 484   2          if(w2sum > 0)
+C51 COMPILER V9.53.0.0   ENERGY                                                            01/05/2018 11:11:16 PAGE 9   
+
+ 485   2            g_Varh_Q1[2]++;
+ 486   2          else
+ 487   2            g_Varh_Q2[2]++;
+ 488   2          }
+ 489   1        //============·´ÏòÎÞ¹¦========================
+ 490   1        while(tem_Varh_N > ENERY_PER_UNIT)
+ 491   1        {
+ 492   2          tem_Varh_N -= ENERY_PER_UNIT;
+ 493   2          if(wsum < 0)
+ 494   2            g_Varh_Q3[3]++;
+ 495   2          else
+ 496   2            g_Varh_Q4[3]++;
+ 497   2        }
+ 498   1      
+ 499   1        while(temA_Varh_N > ENERY_PER_UNIT)
+ 500   1        {
+ 501   2          temA_Varh_N -= ENERY_PER_UNIT;
+ 502   2          if(w0sum < 0)
+ 503   2            g_Varh_Q3[0]++; //ÓÐ¹¦¸º ÎÞ¹¦¸º Î»ÓÚµÚ3ÏóÏÞ
+ 504   2          else
+ 505   2            g_Varh_Q4[0]++; //ÓÐ¹¦¸º ÎÞ¹¦¸º Î»ÓÚµÚ3ÏóÏÞ
+ 506   2        }
+ 507   1      
+ 508   1        while(temB_Varh_N > ENERY_PER_UNIT)
+ 509   1        {
+ 510   2          temB_Varh_N -= ENERY_PER_UNIT;
+ 511   2          if(w1sum < 0)
+ 512   2            g_Varh_Q3[1]++;
+ 513   2          else
+ 514   2            g_Varh_Q4[1]++;
+ 515   2        }
+ 516   1      
+ 517   1        while(temC_Varh_N > ENERY_PER_UNIT)
+ 518   1        {
+ 519   2          temC_Varh_N -= ENERY_PER_UNIT;
+ 520   2          if(w2sum < 0)
+ 521   2            g_Varh_Q3[2]++;
+ 522   2          else
+ 523   2            g_Varh_Q4[2]++;
+ 524   2        }
+ 525   1      }
+ 526          
+ 527          void SaveEnergy(uint32_t addon)
+ 528          {
+ 529   1        RESET_WD();
+ 530   1      
+ 531   1        if(g_Wh_PT[3] > (g_Wh_PT[4] + addon))
+ 532   1        {
+ 533   2          g_Wh_PT[4] = g_Wh_PT[3];
+ 534   2          OSEEPROMWrite(EEPROM_ENERGY_WH_PT, CAT24WCXX_ADDR,(uint8_t*)&g_Wh_PT[0],16);
+ 535   2        }
+ 536   1      
+ 537   1        if(g_Wh_NT[3] > (g_Wh_NT[4] + addon))
+ 538   1        {
+ 539   2          g_Wh_NT[4] = g_Wh_NT[3];
+ 540   2          OSEEPROMWrite(EEPROM_ENERGY_WH_NT, CAT24WCXX_ADDR,(uint8_t*)&g_Wh_NT[0],16);
+ 541   2        }
+ 542   1      
+ 543   1        if(g_Varh_Q1[3] > (g_Varh_Q1[4] + addon))
+ 544   1        {
+ 545   2          g_Varh_Q1[4] = g_Varh_Q1[3];
+ 546   2          OSEEPROMWrite(EEPROM_ENERGY_VARH_Q1, CAT24WCXX_ADDR,(uint8_t*)&g_Varh_Q1[0],16);
+C51 COMPILER V9.53.0.0   ENERGY                                                            01/05/2018 11:11:16 PAGE 10  
+
+ 547   2        }
+ 548   1      
+ 549   1        if(g_Varh_Q2[3] > (g_Varh_Q2[4] + addon))
+ 550   1        {
+ 551   2          g_Varh_Q2[4] = g_Varh_Q2[3];
+ 552   2          OSEEPROMWrite(EEPROM_ENERGY_VARH_Q2, CAT24WCXX_ADDR,(uint8_t*)&g_Varh_Q2[0],16);
+ 553   2        }
+ 554   1      
+ 555   1        if(g_Varh_Q3[3] > (g_Varh_Q3[4] + addon))
+ 556   1        {
+ 557   2          g_Varh_Q3[4] = g_Varh_Q3[3];
+ 558   2          OSEEPROMWrite(EEPROM_ENERGY_VARH_Q3, CAT24WCXX_ADDR,(uint8_t*)&g_Varh_Q3[0],16);
+ 559   2        }
+ 560   1      
+ 561   1        if(g_Varh_Q4[3] > (g_Varh_Q4[4] + addon))
+ 562   1        {
+ 563   2          g_Varh_Q4[4] = g_Varh_Q4[3];
+ 564   2          OSEEPROMWrite(EEPROM_ENERGY_VARH_Q4, CAT24WCXX_ADDR,(uint8_t*)&g_Varh_Q4[0],16);
+ 565   2        }
+ 566   1      
+ 567   1      }
+ 568          
+ 569          void Init_Xfer(void)
+ 570          {
+ 571   1        bool      sucess = TRUE;
+ 572   1        uint8_t     i,j,eeprom_new_flag = 0;
+ 573   1      
+ 574   1        net_status = net_status_lock = 0; //µçÍø×´Ì¬×Ö
+ 575   1        n_Current  = 0;     //ÁãÏßµçÁ÷¼ì²â
+ 576   1        tem_Wh_P = tem_Wh_N = tem_Varh_P = tem_Varh_N = 0;
+ 577   1        temA_Wh_P = temB_Wh_P = temC_Wh_P = 0;
+ 578   1        temA_Wh_N = temB_Wh_N = temC_Wh_N = 0;
+ 579   1        temA_Varh_P = temB_Varh_P = temC_Varh_P = 0;
+ 580   1        temA_Varh_N = temB_Varh_N = temC_Varh_N = 0;
+ 581   1      
+ 582   1        g_EnergyClear   = FALSE;
+ 583   1        U8_CURR_WorkMode = D_NORMAL_MODE;//Õý³£¹¤×÷Ä£Ê½
+ 584   1        OSEEPROMRead(EEPROM_NEW_FLAG,CAT24WCXX_ADDR,&eeprom_new_flag,1);
+ 585   1        if( eeprom_new_flag == 0x55)//³õÊ¼»¯¹ýµÄÄÚ¿¨
+ 586   1        {
+ 587   2          for(i=0;i<3;i++)//³¢ÊÔ3´Î ¶ÁÈ¡µçÁ¿
+ 588   2          {
+ 589   3            sucess &= OSEEPROMRead(EEPROM_ENERGY_WH_PT, CAT24WCXX_ADDR, (uint8_t*)&g_Wh_PT[0], 16);
+ 590   3            sucess &= OSEEPROMRead(EEPROM_ENERGY_WH_NT, CAT24WCXX_ADDR, (uint8_t*)&g_Wh_NT[0], 16);
+ 591   3            sucess &= OSEEPROMRead(EEPROM_ENERGY_VARH_Q1, CAT24WCXX_ADDR, (uint8_t*)&g_Varh_Q1[0], 16);
+ 592   3            sucess &= OSEEPROMRead(EEPROM_ENERGY_VARH_Q2, CAT24WCXX_ADDR, (uint8_t*)&g_Varh_Q2[0], 16);
+ 593   3            sucess &= OSEEPROMRead(EEPROM_ENERGY_VARH_Q3, CAT24WCXX_ADDR, (uint8_t*)&g_Varh_Q3[0], 16);
+ 594   3            sucess &= OSEEPROMRead(EEPROM_ENERGY_VARH_Q4, CAT24WCXX_ADDR, (uint8_t*)&g_Varh_Q4[0], 16);
+ 595   3      
+ 596   3            if(sucess == TRUE) break;//³É¹¦,¾Í²»ÓÃÔÙ³¢ÊÔÁË
+ 597   3          }
+ 598   2      
+ 599   2          g_Wh_PT[4] = g_Wh_PT[3];
+ 600   2          g_Wh_NT[4] = g_Wh_NT[3];
+ 601   2      
+ 602   2          g_Varh_Q1[4] = g_Varh_Q1[3];
+ 603   2          g_Varh_Q2[4] = g_Varh_Q2[3];
+ 604   2          g_Varh_Q3[4] = g_Varh_Q3[3];
+ 605   2          g_Varh_Q4[4] = g_Varh_Q4[3];
+ 606   2        }
+ 607   1        else//ÐÂÄÚ¿¨
+ 608   1        {
+C51 COMPILER V9.53.0.0   ENERGY                                                            01/05/2018 11:11:16 PAGE 11  
+
+ 609   2          for(i=0; i< 5; i++)
+ 610   2          {
+ 611   3            g_Wh_PT[i] = 0;
+ 612   3            g_Wh_NT[i] = 0;
+ 613   3            g_Varh_Q1[i] = 0;
+ 614   3            g_Varh_Q2[i] = 0;
+ 615   3            g_Varh_Q3[i] = 0;
+ 616   3            g_Varh_Q4[i] = 0;
+ 617   3          }
+ 618   2          RESET_WD();
+ 619   2          OSEEPROMWrite(EEPROM_ENERGY_WH_PT, CAT24WCXX_ADDR,(uint8_t*)&g_Wh_PT[0],16);
+ 620   2          OSEEPROMWrite(EEPROM_ENERGY_WH_NT, CAT24WCXX_ADDR,(uint8_t*)&g_Wh_NT[0],16);
+ 621   2          OSEEPROMWrite(EEPROM_ENERGY_VARH_Q1, CAT24WCXX_ADDR,(uint8_t*)&g_Varh_Q1[0],16);
+ 622   2          OSEEPROMWrite(EEPROM_ENERGY_VARH_Q2, CAT24WCXX_ADDR,(uint8_t*)&g_Varh_Q2[0],16);
+ 623   2          OSEEPROMWrite(EEPROM_ENERGY_VARH_Q3, CAT24WCXX_ADDR,(uint8_t*)&g_Varh_Q3[0],16);
+ 624   2          OSEEPROMWrite(EEPROM_ENERGY_VARH_Q4, CAT24WCXX_ADDR,(uint8_t*)&g_Varh_Q4[0],16);
+ 625   2        }
+ 626   1      
+ 627   1        for(i=0;i<3;i++)
+ 628   1        {
+ 629   2          g_V_Temp[i]       = 0;
+ 630   2          g_V_Line_Temp[i]    = 0;
+ 631   2          g_I_Temp[i]       = 0;
+ 632   2          g_Cos_T[i]        = 1000;//ABC ¹¦ÂÊÒòÊý³õÊ¼»¯Îª1
+ 633   2          g_PhUI_T[i]     = 0;
+ 634   2        }
+ 635   1        g_I_Temp[3]    = 0;
+ 636   1        g_Cos_T[3]     = 1000;//×Ü ¹¦ÂÊÒòÊý³õÊ¼»¯Îª1
+ 637   1        g_PhUU_T[0]    =12000;  //³õÊ¼»¯Îª120,240¶È
+ 638   1        g_PhUU_T[1]    =24000;
+ 639   1      
+ 640   1        for(i = 0; i < 4; i++)
+ 641   1        {
+ 642   2          g_PW_T[i]   = 0;
+ 643   2          g_PVar_T[i] = 0;
+ 644   2        }
+ 645   1      
+ 646   1        for(i = 0; i < 3; i++)
+ 647   1        {
+ 648   2          for (j = 0; j < AV_POWER_N ; j++)
+ 649   2            g_PW_T_Buf[i][j] = 0;
+ 650   2        }
+ 651   1        Load_Calib_Data(EEPROM_TDK6545H_PARA_ADDR0);//¼ÓÔØÐ£×¼²ÎÊý
+ 652   1        iadcN_p = 0;
+ 653   1        n_current_adc = 0;
+ 654   1        return;
+ 655   1      }
+ 656          
+ 657          void Cal_module()
+ 658          {
+ 659   1        uint32_t  av_power[3],power_temp;//×î½ü3ÃëÆ½¾ù¹¦ÂÊ
+ 660   1        uint32_t  p_buf[3][AV_POWER_N];//¸´ÖÆÒ»·Ý»º´æ¹¦ÂÊ£¬½øÐÐÅÅÐò
+ 661   1        uint8_t   i,j,k;
+ 662   1        int32_t   Ev,Axv;
+ 663   1        int32_t   E0,Axi;
+ 664   1        int32_t   CAL_V[3],CAL_I[3];
+ 665   1        int16_t   PHADJ[3];
+ 666   1        int32x_t  * dadr;
+ 667   1        int32x_t  sdata;
+ 668   1        static  bool    Whether_cal = FALSE;//ÊÇ·ñ±»Ð£Õý¹ý
+ 669   1        //static  bool    Rst_cal = FALSE;//Ð£Õý¿ªÊ¼Ê±£¬ÐèÒªÐ£ÕýµÄÏà£¬Ð£Õý²ÎÊýÒª»Ö¸´Ä¬ÈÏÖµ
+ 670   1        for (i=0; i< 3; i++)//³õÊ¼»¯
+C51 COMPILER V9.53.0.0   ENERGY                                                            01/05/2018 11:11:16 PAGE 12  
+
+ 671   1        {
+ 672   2          av_power[i] = 0;
+ 673   2          CAL_V[i] = 0;
+ 674   2          CAL_I[i] = 0;
+ 675   2          PHADJ[i] = 0;
+ 676   2        }
+ 677   1        //Æ½¾ù¹¦ÂÊ,ABCÏà
+ 678   1        for (i=0;i<3;i++)
+ 679   1        {
+ 680   2          for(j=0;j<AV_POWER_N;j++)
+ 681   2            av_power[i] += g_PW_T_Buf[i][j];
+ 682   2          av_power[i] /= 3;
+ 683   2        }
+ 684   1        //¸´ÖÆÒ»·Ý¹¦ÂÊ»º³åÓÃÓÚÅÅÐò
+ 685   1        for(i = 0; i < 3; i++)
+ 686   1        {
+ 687   2          for(j =0 ;j< AV_POWER_N; j++)
+ 688   2            p_buf[i][j] = g_PW_T_Buf[i][j];
+ 689   2        }
+ 690   1        for(k=0; k < 3; k++)//ABCÈýÏà
+ 691   1        {
+ 692   2          for(i = 0; i < AV_POWER_N; i++)//Ã°ÅÝÅÅÐò
+ 693   2              {
+ 694   3                  for(j = 0; i < AV_POWER_N - j- 1; j++)
+ 695   3                  {
+ 696   4                      if(p_buf[k][j] > p_buf[k][j + 1])
+ 697   4                      {
+ 698   5                        power_temp = p_buf[k][j];
+ 699   5                        p_buf[k][j] = p_buf[k][j + 1];
+ 700   5                        p_buf[k][j + 1] = power_temp;
+ 701   5                      }
+ 702   4                  }
+ 703   3              }
+ 704   2        }
+ 705   1        if(U8_CURR_WorkMode == D_NORMAL_MODE)//Õý³£Ä£Ê½ÏÂ£¬ÅÐ¶ÏÊÇ·ñÐèÒª×ª»»×´Ì¬
+ 706   1        {
+ 707   2          if(FAC == FAC_EN)
+ 708   2          {
+ 709   3            if(U16_FAC_STABLE_Times >= 10)
+ 710   3            {
+ 711   4              U16_FAC_STABLE_Times = 0;
+ 712   4              U8_CURR_WorkMode = D_CAL_START_MODE;
+ 713   4            }
+ 714   3            else
+ 715   3              U16_FAC_STABLE_Times ++;
+ 716   3      
+ 717   3          }
+ 718   2          else
+ 719   2            U16_FAC_STABLE_Times = 0;
+ 720   2        }
+ 721   1        if(U8_CURR_WorkMode == D_CAL_START_MODE)//Ð£±í×´Ì¬
+ 722   1          {
+ 723   2            if (Whether_cal == FALSE)//Ã¿´Î½øÈëÐ£±í×´Ì¬£¬Ö»Ð£Õý1´Î¡£
+ 724   2            {
+ 725   3              for(i = 0; i < 3; i++)
+ 726   3              {
+ 727   4                if(av_power[i] >= CAL_POWER_MIN && av_power[i] <= CAL_POWER_MAX
+ 728   4                  && p_buf[i][AV_POWER_N-1] - p_buf[i][0] <= CAL_POWER_DEVIATION)
+ 729   4                  {
+ 730   5                    //Ev=(²âÁ¿Öµ-±ê×¼Öµ)/±ê×¼Öµ  , Axv = 1+Ev ·Å´ó10000±¶
+ 731   5                    Ev = ( (int32_t)g_V_Temp[i] - STAND_V ) * 10000 / STAND_V;
+ 732   5                    Axv = 10000 + Ev;
+C51 COMPILER V9.53.0.0   ENERGY                                                            01/05/2018 11:11:16 PAGE 13  
+
+ 733   5                    CAL_V[i] = 163840000 / Axv;
+ 734   5                    //E0=(²âÁ¿Öµ-±ê×¼Öµ)/±ê×¼Öµ, Axi = (1+E0)/Axv ¹¦ÂÊÒòÊý1.0
+ 735   5                    E0 = ( (int32_t)g_PW_T[i] - STAND_P ) *10000 / STAND_P;
+ 736   5                    Axi =  (10000 + E0) * 10000  / Axv;
+ 737   5                    CAL_I[i] = 163840000 / Axi;
+ 738   5                    //Ð£±íÖµ±£´æµ½RAM µÍµØÖ·´æ·ÅµÍ×Ö½Ú ¸ßµØÖ·´æ·Å¸ß×Ö½Ú
+ 739   5                    Bakbuf[4*i]   = CAL_I[i] % 256;
+ 740   5                    Bakbuf[4*i+1] = CAL_I[i] / 256;
+ 741   5                    Bakbuf[4*i+2] = CAL_V[i] % 256;
+ 742   5                    Bakbuf[4*i+3] = CAL_V[i] / 256;
+ 743   5                    Whether_cal = TRUE;
+ 744   5                  }
+ 745   4              }
+ 746   3              if( Whether_cal == TRUE )
+ 747   3                {
+ 748   4                  //Ð£±íÖµÐ´ÈëCE RAM,È«²¿Ë¢ÐÂÒ»±é
+ 749   4                  EA = 0;
+ 750   4                  for (j=0;j<10;j++)
+ 751   4                  {
+ 752   5                    //BakbufÖÐµÄÃ¿2×Ö½Ú£¬ºÏ³É16Î»Êý
+ 753   5                    sdata = Bakbuf[j*2+1]*256 + Bakbuf[j*2];
+ 754   5                    dadr = (TDK6545PARAADDR[j]*4);//È¡CEÖÐÓ¦¸Ã´æ·ÅµÄµØÖ·
+ 755   5                    memcpy_cex_1( dadr, &sdata);
+ 756   5                  }
+ 757   4                  EA = 1;
+ 758   4                  //Ð£±íÖµ±£´æ
+ 759   4                  OSEEPROMWrite(EEPROM_TDK6545H_PARA_ADDR0, CAT24WCXX_ADDR,&Bakbuf[0],PARA_NUM);
+ 760   4                }
+ 761   3            }
+ 762   2            if(FAC == FAC_DIS)
+ 763   2            {
+ 764   3              if(U16_FAC_STABLE_Times >= 10)
+ 765   3              {
+ 766   4                U16_FAC_STABLE_Times = 0;
+ 767   4                U8_CURR_WorkMode = D_NORMAL_MODE;
+ 768   4                Whether_cal = FALSE;
+ 769   4              }
+ 770   3              else
+ 771   3                U16_FAC_STABLE_Times ++;
+ 772   3            }
+ 773   2            else
+ 774   2              U16_FAC_STABLE_Times = 0;
+ 775   2          }
+ 776   1          //Ð£×¼½áÊø
+ 777   1      }
+ 778          void earth_dec_init(void)
+ 779          {
+ 780   1        EarthDelayStar = 0;   //µØÏß¼ì²â¿ªÊ¼±êÊ¶
+ 781   1        EarthDelayCnt = 0;    //µØÏß¼ì²â³¬Ê±Ê±¼ä
+ 782   1        EarthDelayOut = 0;      //µØÏß¼ì²â³¬Ê±±êÊ¶
+ 783   1      }
+ 784          void earth_dec()
+ 785          {
+ 786   1        if(EARTH_DEC == 0 && EarthDelayStar == 0)//µÚÒ»´Î¼ì²âµ½µØÏß´íÎó
+ 787   1        {
+ 788   2          EarthDelayStar = 1;
+ 789   2          EarthDelayCnt = 2;//20ms
+ 790   2        }
+ 791   1        if( EARTH_DEC == 0 && EarthDelayOut ==1)//³¬Ê±ºóÈÔÈ»µØÏß´íÎó
+ 792   1        {
+ 793   2          earth_dec_init();
+ 794   2          net_status |= 0x01;//set bit 0 µØÏß¼ì²â
+C51 COMPILER V9.53.0.0   ENERGY                                                            01/05/2018 11:11:16 PAGE 14  
+
+ 795   2          if( net_status != 0)
+ 796   2            TELL_MCU;
+ 797   2          net_status_lock |= 0x01;//set bit 0 µØÏß¼ì²â
+ 798   2        }
+ 799   1        if(EARTH_DEC == 1 )
+ 800   1        {
+ 801   2          earth_dec_init();
+ 802   2          net_status &= 0xfe;//clr bit 0 µØÏß¼ì²â
+ 803   2          if( net_status == 0)
+ 804   2            NOT_TELL;
+ 805   2        }
+ 806   1      
+ 807   1      }
+ 808          
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =   6037    ----
+   CONSTANT SIZE    =     10    ----
+   XDATA SIZE       =    549     154
+   PDATA SIZE       =   ----    ----
+   DATA SIZE        =   ----    ----
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =      2       1
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)
